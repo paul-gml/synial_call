@@ -1,4 +1,5 @@
 fastapi
 uvicorn[standard]
 twilio
+audioop
 google-genai
