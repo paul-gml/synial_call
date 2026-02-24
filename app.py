@@ -271,6 +271,39 @@ BASE_SYSTEM_TEMPLATE = (
     "Si l'interlocuteur veut raccrocher, réponds 'Merci, au revoir.' "
 )
 
+AI_ROLE_TEMPLATES = {
+    "journaliste": (
+        "Tu es une journaliste d'actualité. "
+        "Tu appelles {player_name} au téléphone pour lui poser des questions dans un serious game de gestion de crise. "
+        "Tu es professionnelle, directe, et tu poses des questions courtes, une par une. "
+        "RÉPONDS EN FRANÇAIS, de façon naturelle et concise (1 à 3 phrases). "
+        "IMPORTANT: N'initie pas la conversation tant que tu n'as pas entendu l'interlocuteur parler (ex: 'Allô'). "
+        "Si l'interlocuteur veut raccrocher, réponds 'Merci, au revoir.' "
+    ),
+    "prefet": (
+        "Tu es le préfet. "
+        "Tu appelles {player_name} pour obtenir des informations opérationnelles sur la crise et donner des consignes. "
+        "Tu es clair, ferme, et tu poses des questions courtes, une par une. "
+        "RÉPONDS EN FRANÇAIS, de façon naturelle et concise (1 à 3 phrases). "
+        "IMPORTANT: N'initie pas la conversation tant que tu n'as pas entendu l'interlocuteur parler (ex: 'Allô'). "
+        "Si l'interlocuteur veut raccrocher, réponds 'Merci, au revoir.' "
+    ),
+    "colonel_pompiers": (
+        "Tu es le colonel des pompiers. "
+        "Tu appelles {player_name} pour coordonner la réponse opérationnelle (moyens, risques, priorités). "
+        "Tu es technique mais concis, et tu poses des questions courtes, une par une. "
+        "RÉPONDS EN FRANÇAIS, de façon naturelle et concise (1 à 3 phrases). "
+        "IMPORTANT: N'initie pas la conversation tant que tu n'as pas entendu l'interlocuteur parler (ex: 'Allô'). "
+        "Si l'interlocuteur veut raccrocher, réponds 'Merci, au revoir.' "
+    ),
+}
+
+def normalize_ai_role(s: str) -> str:
+    s = (s or "").strip().lower()
+    s = s.replace(" ", "_")
+    s = s.replace("é", "e").replace("è", "e").replace("ê", "e").replace("à", "a").replace("ç", "c")
+    return s or "journaliste"
+
 
 def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
     kwargs: Dict[str, Any] = dict(
@@ -564,6 +597,9 @@ async def api_prepare_call(request: Request):
     number_session = int(body.get("number_session") or 0)
     history_text = str(body.get("history_text") or "").strip()
     player_role = str(body.get("player_role") or "").strip()
+    ai_role = normalize_ai_role(str(body.get("ai_role") or "journaliste"))
+    if ai_role not in AI_ROLE_TEMPLATES:
+        ai_role = "journaliste"
     if len(history_text) > 8000:
         history_text = history_text[-8000:]
 
@@ -573,7 +609,7 @@ async def api_prepare_call(request: Request):
     if ALLOWED_TO_PREFIXES and not any(to_number.startswith(p) for p in ALLOWED_TO_PREFIXES):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
-    base = BASE_SYSTEM_TEMPLATE.format(player_name=player_name)
+    base = AI_ROLE_TEMPLATES[ai_role].format(player_name=player_name)
     if player_role:
         base += "\n\nINFO INTERLOCUTEUR:\n- Poste / fonction pendant la crise : " + player_role
 
@@ -624,7 +660,7 @@ async def api_prepare_call(request: Request):
         stream_ws_url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream")
         twiml = build_twiml_stream(
         stream_ws_url,
-        custom_parameters={"call_id": call_id, "role": "journalist", "number_session": str(number_session)})
+        custom_parameters={"call_id": call_id, "ai_role": ai_role, "number_session": str(number_session)}
 
         def _do_call() -> str:
             client = _twilio_client()
