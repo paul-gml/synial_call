@@ -35,6 +35,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, 
 from twilio.rest import Client as TwilioClient
 from google import genai
 from google.genai import types
+import requests
 
 
 # ============================================================
@@ -67,6 +68,9 @@ if GCP_CREDS_JSON and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_path
     except Exception:
         pass
+
+MAIN_APP_BASE_URL = os.getenv("MAIN_APP_BASE_URL", "").strip().rstrip("/")  # ex: https://synial.onrender.com
+INTERNAL_APP_TOKEN = os.getenv("INTERNAL_APP_TOKEN", "").strip()           # = INTERNAL_VOICE_TOKEN côté Flask
 
 PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "").strip()
 LOCATION = (os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GOOGLE_CLOUD_REGION") or "us-central1").strip()
@@ -311,6 +315,12 @@ class PreparedCall:
     cleanup_task: Optional[asyncio.Task] = None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
+    number_session: int = 0
+    transcript_turns: list = field(default_factory=list)
+    transcript_sent: bool = False
+    last_user_tr: str = ""
+    last_assistant_tr: str = ""
+
 
 PREPARED: Dict[str, PreparedCall] = {}
 PREPARED_LOCK = asyncio.Lock()
@@ -375,8 +385,8 @@ async def gemini_receiver_loop(
     converter: AudioConverter,
     out_frames_q: asyncio.Queue,
     call_id: str,
-    twilio_call_sid: Optional[str],
-) -> None:
+    prepared_call: Optional[PreparedCall]) -> None:
+    twilio_call_sid = prepared_call.twilio_call_sid if prepared_call else None
     async def _hangup_later(delay_s: float) -> None:
         if not (AUTO_HANGUP_ON_GOODBYE and twilio_call_sid):
             return
@@ -398,6 +408,18 @@ async def gemini_receiver_loop(
                         logger.info("[%s][user] %s", call_id, in_tr.text)
 
                     out_tr = getattr(message, "output_transcription", None)
+                    if prepared_call is not None:
+                        if in_tr is not None and getattr(in_tr, "text", None):
+                            txt = in_tr.text.strip()
+                            if txt and txt != prepared_call.last_user_tr:
+                                prepared_call.last_user_tr = txt
+                                prepared_call.transcript_turns.append({"role": "user", "text": txt})
+
+                        if out_tr is not None and getattr(out_tr, "text", None):
+                            txt = out_tr.text.strip()
+                            if txt and txt != prepared_call.last_assistant_tr:
+                                prepared_call.last_assistant_tr = txt
+                                prepared_call.transcript_turns.append({"role": "assistant", "text": txt})
                     if out_tr is not None and getattr(out_tr, "text", None):
                         out_text = out_tr.text
                         logger.info("[%s][assistant] %s", call_id, out_text)
@@ -539,6 +561,10 @@ async def api_prepare_call(request: Request):
     body = await request.json()
     to_number = str(body.get("to", "")).strip()
     player_name = str(body.get("player_name", "Joueur")).strip() or "Joueur"
+    number_session = int(body.get("number_session") or 0)
+    history_text = str(body.get("history_text") or "").strip()
+    if len(history_text) > 8000:
+        history_text = history_text[-8000:]
 
     if not to_number or not validate_e164(to_number):
         raise HTTPException(status_code=400, detail="Invalid 'to' (expected E.164 like +336...) ")
@@ -546,7 +572,18 @@ async def api_prepare_call(request: Request):
     if ALLOWED_TO_PREFIXES and not any(to_number.startswith(p) for p in ALLOWED_TO_PREFIXES):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
-    system_instruction = BASE_SYSTEM_TEMPLATE.format(player_name=player_name)
+    base = BASE_SYSTEM_TEMPLATE.format(player_name=player_name)
+
+    if history_text:
+        system_instruction = (
+            base
+            + "\n\n--- HISTORIQUE RECENT (chat) ---\n"
+            + history_text
+            + "\n--- FIN HISTORIQUE ---\n"
+            + "Consigne: utilise cet historique pour contextualiser tes questions."
+        )
+    else:
+        system_instruction = base
     config = build_live_config(system_instruction)
 
     call_id = uuid.uuid4().hex
@@ -562,6 +599,7 @@ async def api_prepare_call(request: Request):
         raise HTTPException(status_code=500, detail=f"Gemini connect failed: {e}")
 
     pc = PreparedCall(
+        number_session=number_session,
         call_id=call_id,
         created_at=t0,
         expires_at=t0 + PREPARED_SESSION_TTL_SECONDS,
@@ -581,7 +619,9 @@ async def api_prepare_call(request: Request):
 
     try:
         stream_ws_url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream")
-        twiml = build_twiml_stream(stream_ws_url, custom_parameters={"call_id": call_id, "role": "journalist"})
+        twiml = build_twiml_stream(
+        stream_ws_url,
+        custom_parameters={"call_id": call_id, "role": "journalist", "number_session": str(number_session)})
 
         def _do_call() -> str:
             client = _twilio_client()
@@ -654,11 +694,19 @@ async def twilio_stream(websocket: WebSocket):
 
         if prepared is None:
             logger.warning("[%s] no prepared session found -> fallback connect (latency likely)", call_id)
+
+            # ✅ Récupérer number_session depuis les customParameters Twilio
+            try:
+                fallback_number_session = int(ctx.custom_parameters.get("number_session") or 0)
+            except Exception:
+                fallback_number_session = 0
+
             system_instruction = BASE_SYSTEM_TEMPLATE.format(player_name="Joueur")
             config = build_live_config(system_instruction)
             gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
             cm = gemini_client.aio.live.connect(model=MODEL_ID, config=config)
             session = await cm.__aenter__()
+
             prepared = PreparedCall(
                 call_id=call_id,
                 created_at=time.time(),
@@ -672,6 +720,7 @@ async def twilio_stream(websocket: WebSocket):
                 twilio_call_sid=ctx.call_sid,
                 twilio_stream_sid=ctx.stream_sid,
                 state="in_call",
+                number_session=fallback_number_session,  # ✅ important
             )
         else:
             if prepared.cleanup_task:
@@ -725,7 +774,7 @@ async def twilio_stream(websocket: WebSocket):
         t_in = asyncio.create_task(_twilio_receiver_after_start())
         t_out = asyncio.create_task(
             gemini_receiver_loop(
-                websocket, send_lock, session, ctx, stop_event, converter, out_frames_q, call_id, prepared.twilio_call_sid
+                websocket, send_lock, session, ctx, stop_event, converter, out_frames_q, call_id, prepared
             )
         )
         t_send = asyncio.create_task(twilio_sender_loop(websocket, send_lock, ctx, stop_event, out_frames_q, call_id))
@@ -748,7 +797,17 @@ async def twilio_stream(websocket: WebSocket):
     finally:
         stop_event.set()
         converter.reset()
-
+        try:
+            if prepared and (not prepared.transcript_sent) and prepared.number_session and prepared.transcript_turns:
+                await asyncio.to_thread(
+                    post_transcript_to_flask,
+                    prepared.number_session,
+                    prepared.twilio_call_sid or (ctx.call_sid or ""),
+                    prepared.transcript_turns
+                )
+                prepared.transcript_sent = True
+        except Exception as e:
+            logger.warning("[%s] transcript post failed: %s", call_id, e)
         if prepared is not None:
             async with PREPARED_LOCK:
                 in_store = PREPARED.get(call_id) is prepared
@@ -765,6 +824,23 @@ async def twilio_stream(websocket: WebSocket):
         except Exception:
             pass
 
+
+def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) -> None:
+    if not (MAIN_APP_BASE_URL and INTERNAL_APP_TOKEN and number_session):
+        return
+
+    url = f"{MAIN_APP_BASE_URL}/internal/voice/transcript"
+    payload = {"number_session": number_session, "call_sid": call_sid, "turns": turns}
+
+    # retry simple
+    for i in range(3):
+        try:
+            r = requests.post(url, json=payload, headers={"X-Internal-Token": INTERNAL_APP_TOKEN}, timeout=20)
+            if 200 <= r.status_code < 300:
+                return
+        except Exception:
+            pass
+        time.sleep(0.8 * (i + 1))
 
 if __name__ == "__main__":
     import uvicorn
