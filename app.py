@@ -563,6 +563,7 @@ async def api_prepare_call(request: Request):
     player_name = str(body.get("player_name", "Joueur")).strip() or "Joueur"
     number_session = int(body.get("number_session") or 0)
     history_text = str(body.get("history_text") or "").strip()
+    player_role = str(body.get("player_role") or "").strip()
     if len(history_text) > 8000:
         history_text = history_text[-8000:]
 
@@ -573,6 +574,8 @@ async def api_prepare_call(request: Request):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
     base = BASE_SYSTEM_TEMPLATE.format(player_name=player_name)
+    if player_role:
+        base += "\n\nINFO INTERLOCUTEUR:\n- Poste / fonction pendant la crise : " + player_role
 
     if history_text:
         system_instruction = (
