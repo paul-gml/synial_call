@@ -660,7 +660,7 @@ async def api_prepare_call(request: Request):
         stream_ws_url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream")
         twiml = build_twiml_stream(
         stream_ws_url,
-        custom_parameters={"call_id": call_id, "ai_role": ai_role, "number_session": str(number_session)}
+        custom_parameters={"call_id": call_id, "ai_role": ai_role, "number_session": str(number_session)})
 
         def _do_call() -> str:
             client = _twilio_client()
