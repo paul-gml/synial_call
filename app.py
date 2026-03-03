@@ -810,7 +810,10 @@ async def twilio_stream(websocket: WebSocket):
         async def _twilio_receiver_after_start():
             try:
                 while not stop_event.is_set():
-                    text = await websocket.receive_text()
+                    try:
+                        text = await asyncio.wait_for(websocket.receive_text(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
                     msg2 = json.loads(text)
                     ev = msg2.get("event")
 
