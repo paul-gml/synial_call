@@ -342,6 +342,7 @@ class PreparedCall:
 
     to_number: str
     player_name: str
+    player_role: str
     system_instruction: str
 
     gemini_client: Any
@@ -675,6 +676,7 @@ async def api_prepare_call(request: Request):
         expires_at=t0 + PREPARED_SESSION_TTL_SECONDS,
         to_number=to_number,
         player_name=player_name,
+        player_role=player_role,
         system_instruction=system_instruction,
         gemini_client=gemini_client,
         gemini_cm=cm,
@@ -846,6 +848,7 @@ async def twilio_stream(websocket: WebSocket):
                                         prepared.number_session,
                                         prepared.twilio_call_sid or (ctx.call_sid or ""),
                                         prepared.transcript_turns,
+                                        prepared.player_name,
                                     )
                                     prepared.transcript_sent = True
                                     logger.info("[%s] transcript sent on stop event", call_id)
@@ -937,7 +940,7 @@ async def twilio_stream(websocket: WebSocket):
             pass
 
 
-def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) -> None:
+def post_transcript_to_flask(number_session: int, call_sid: str, turns: list, player_name: str = "Joueur") -> None:
     if not MAIN_APP_BASE_URL:
         logger.error("[transcript] MAIN_APP_BASE_URL is empty! Cannot send transcript.")
         return
@@ -950,7 +953,7 @@ def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) ->
     logger.info("[transcript] Sending %d turns for session %s to %s", len(turns), number_session, MAIN_APP_BASE_URL)
 
     url = f"{MAIN_APP_BASE_URL}/internal/voice/transcript"
-    payload = {"number_session": number_session, "call_sid": call_sid, "turns": turns}
+    payload = {"number_session": number_session, "call_sid": call_sid, "turns": turns, "player_name": player_name}
 
     # retry simple
     for i in range(3):
