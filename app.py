@@ -435,7 +435,7 @@ async def gemini_receiver_loop(
     try:
         while not stop_event.is_set():
             async for message in session.receive():
-                                server_content = getattr(message, "server_content", None)
+                server_content = getattr(message, "server_content", None)
 
                 if server_content and ENABLE_TRANSCRIPTIONS:
                     in_tr = getattr(server_content, "input_transcription", None)
