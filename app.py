@@ -307,7 +307,7 @@ def normalize_ai_role(s: str) -> str:
 
 def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
     kwargs: Dict[str, Any] = dict(
-        response_modalities=["AUDIO"],
+        response_modalities=["AUDIO","TEXT"],
         system_instruction=types.Content(
             role="system", parts=[types.Part.from_text(text=system_instruction_text)]
         ),
@@ -435,35 +435,32 @@ async def gemini_receiver_loop(
     try:
         while not stop_event.is_set():
             async for message in session.receive():
-                if ENABLE_TRANSCRIPTIONS:
-                    in_tr = getattr(message, "input_transcription", None)
+                                server_content = getattr(message, "server_content", None)
+
+                if server_content and ENABLE_TRANSCRIPTIONS:
+                    in_tr = getattr(server_content, "input_transcription", None)
                     if in_tr is not None and getattr(in_tr, "text", None):
-                        logger.info("[%s][user] %s", call_id, in_tr.text)
+                        txt = in_tr.text.strip()
+                        if prepared_call is not None and txt and txt != prepared_call.last_user_tr:
+                            prepared_call.last_user_tr = txt
+                            prepared_call.transcript_turns.append({"role": "user", "text": txt})
+                        logger.info("[%s][user] %s", call_id, txt)
 
-                    out_tr = getattr(message, "output_transcription", None)
-                    if prepared_call is not None:
-                        if in_tr is not None and getattr(in_tr, "text", None):
-                            txt = in_tr.text.strip()
-                            if txt and txt != prepared_call.last_user_tr:
-                                prepared_call.last_user_tr = txt
-                                prepared_call.transcript_turns.append({"role": "user", "text": txt})
-
-                        if out_tr is not None and getattr(out_tr, "text", None):
-                            txt = out_tr.text.strip()
-                            if txt and txt != prepared_call.last_assistant_tr:
-                                prepared_call.last_assistant_tr = txt
-                                prepared_call.transcript_turns.append({"role": "assistant", "text": txt})
+                    out_tr = getattr(server_content, "output_transcription", None)
                     if out_tr is not None and getattr(out_tr, "text", None):
-                        out_text = out_tr.text
-                        logger.info("[%s][assistant] %s", call_id, out_text)
+                        txt = out_tr.text.strip()
+                        if prepared_call is not None and txt and txt != prepared_call.last_assistant_tr:
+                            prepared_call.last_assistant_tr = txt
+                            prepared_call.transcript_turns.append({"role": "assistant", "text": txt})
+                        logger.info("[%s][assistant] %s", call_id, txt)
 
-                        if AUTO_HANGUP_ON_GOODBYE and (not hangup_scheduled) and GOODBYE_REGEX.search(out_text or ""):
+                        if AUTO_HANGUP_ON_GOODBYE and (not hangup_scheduled) and GOODBYE_REGEX.search(txt or ""):
                             hangup_scheduled = True
                             asyncio.create_task(_hangup_later(HANGUP_DELAY_SECONDS))
 
-                server_content = getattr(message, "server_content", None)
                 if not server_content:
                     continue
+
 
                 if getattr(server_content, "interrupted", False):
                     if ctx.stream_sid:
