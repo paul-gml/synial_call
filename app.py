@@ -418,6 +418,28 @@ class StreamContext:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     last_inbound_ts: float = 0.0
 
+async def inbound_inactivity_watchdog(ctx: StreamContext, stop_event: asyncio.Event, call_id: str) -> None:
+    """
+    Force la fin côté serveur si plus aucun audio inbound (Twilio media inbound) depuis N secondes.
+    """
+    try:
+        # On attend le démarrage effectif du stream
+        await ctx.started.wait()
+        # Init : si rien n'est encore arrivé, on met maintenant
+        if not ctx.last_inbound_ts:
+            ctx.last_inbound_ts = time.time()
+
+        while not stop_event.is_set():
+            await asyncio.sleep(1.0)
+            idle = time.time() - (ctx.last_inbound_ts or 0.0)
+            if idle >= INBOUND_INACTIVITY_SECONDS:
+                logger.info("[%s] inbound inactivity %.1fs >= %.1fs -> force stop_event", call_id, idle, INBOUND_INACTIVITY_SECONDS)
+                stop_event.set()
+                return
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logger.warning("[%s] inactivity watchdog error: %s", call_id, e)
 
 async def gemini_receiver_loop(
     websocket: WebSocket,
@@ -1041,29 +1063,6 @@ def transcribe_recording_and_post_to_flask(
     logger.info("[%s][audio_tx] posting %d turns to Flask session=%s", call_id, len(turns), number_session)
     post_transcript_to_flask(number_session, call_sid, turns)
 
-
-async def inbound_inactivity_watchdog(ctx: StreamContext, stop_event: asyncio.Event, call_id: str) -> None:
-    """
-    Force la fin côté serveur si plus aucun audio inbound (Twilio media inbound) depuis N secondes.
-    """
-    try:
-        # On attend le démarrage effectif du stream
-        await ctx.started.wait()
-        # Init : si rien n'est encore arrivé, on met maintenant
-        if not ctx.last_inbound_ts:
-            ctx.last_inbound_ts = time.time()
-
-        while not stop_event.is_set():
-            await asyncio.sleep(1.0)
-            idle = time.time() - (ctx.last_inbound_ts or 0.0)
-            if idle >= INBOUND_INACTIVITY_SECONDS:
-                logger.info("[%s] inbound inactivity %.1fs >= %.1fs -> force stop_event", call_id, idle, INBOUND_INACTIVITY_SECONDS)
-                stop_event.set()
-                return
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        logger.warning("[%s] inactivity watchdog error: %s", call_id, e)
 
 if __name__ == "__main__":
     import uvicorn
