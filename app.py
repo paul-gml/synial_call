@@ -318,8 +318,8 @@ def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
         ),
     )
     if ENABLE_TRANSCRIPTIONS:
-        kwargs["input_audio_transcription"] = {}
-        kwargs["output_audio_transcription"] = {}
+        kwargs["input_audio_transcription"] = types.AudioTranscriptionConfig()
+        kwargs["output_audio_transcription"] = types.AudioTranscriptionConfig()
     return types.LiveConnectConfig(**kwargs)
 
 
@@ -837,11 +837,13 @@ async def twilio_stream(websocket: WebSocket):
         stop_event.set()
         converter.reset()
         try:
-            logger.info("[%s] Call ended. transcript_turns=%d, number_session=%s, already_sent=%s",
+            logger.info("[%s] === CALL ENDED === transcript_turns=%d, number_session=%s, already_sent=%s, MAIN_APP_BASE_URL=%s, INTERNAL_APP_TOKEN_set=%s",
                         call_id,
                         len(prepared.transcript_turns) if prepared else 0,
                         prepared.number_session if prepared else "N/A",
-                        prepared.transcript_sent if prepared else "N/A")
+                        prepared.transcript_sent if prepared else "N/A",
+                        bool(MAIN_APP_BASE_URL),
+                        bool(INTERNAL_APP_TOKEN))
             if prepared and (not prepared.transcript_sent) and prepared.number_session and prepared.transcript_turns:
                 await asyncio.to_thread(
                     post_transcript_to_flask,
