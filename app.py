@@ -62,6 +62,7 @@ TWILIO_SAY_LANG = os.getenv("TWILIO_SAY_LANG", "fr-FR").strip()
 
 
 TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-1.5-flash").strip()
+INBOUND_INACTIVITY_SECONDS = float(os.getenv("INBOUND_INACTIVITY_SECONDS", "20"))
 
 # --- Google / Vertex AI Live ---
 # Option: mettre un JSON de service account directement dans une variable.
@@ -415,6 +416,7 @@ class StreamContext:
     call_sid: Optional[str] = None
     custom_parameters: Dict[str, str] = field(default_factory=dict)
     started: asyncio.Event = field(default_factory=asyncio.Event)
+    last_inbound_ts: float = 0.0
 
 
 async def gemini_receiver_loop(
@@ -799,6 +801,7 @@ async def twilio_stream(websocket: WebSocket):
                         if not payload_b64:
                             continue
                         ulaw = base64.b64decode(payload_b64)
+                        ctx.last_inbound_ts = time.time()
                         if prepared is not None:
                             prepared.in_ulaw_frames.append(ulaw)
                         pcm16k = converter.twilio_ulaw8k_to_gemini_pcm16k(ulaw)
@@ -826,8 +829,8 @@ async def twilio_stream(websocket: WebSocket):
             )
         )
         t_send = asyncio.create_task(twilio_sender_loop(websocket, send_lock, ctx, stop_event, out_frames_q, call_id))
-
-        done, pending = await asyncio.wait({t_in, t_out, t_send}, return_when=asyncio.FIRST_EXCEPTION)
+        t_idle = asyncio.create_task(inbound_inactivity_watchdog(ctx, stop_event, call_id))
+        done, pending = await asyncio.wait({t_in, t_out, t_send, t_idle}, return_when=asyncio.FIRST_EXCEPTION)
 
         for task in done:
             exc = task.exception()
@@ -1038,6 +1041,29 @@ def transcribe_recording_and_post_to_flask(
     logger.info("[%s][audio_tx] posting %d turns to Flask session=%s", call_id, len(turns), number_session)
     post_transcript_to_flask(number_session, call_sid, turns)
 
+
+async def inbound_inactivity_watchdog(ctx: StreamContext, stop_event: asyncio.Event, call_id: str) -> None:
+    """
+    Force la fin côté serveur si plus aucun audio inbound (Twilio media inbound) depuis N secondes.
+    """
+    try:
+        # On attend le démarrage effectif du stream
+        await ctx.started.wait()
+        # Init : si rien n'est encore arrivé, on met maintenant
+        if not ctx.last_inbound_ts:
+            ctx.last_inbound_ts = time.time()
+
+        while not stop_event.is_set():
+            await asyncio.sleep(1.0)
+            idle = time.time() - (ctx.last_inbound_ts or 0.0)
+            if idle >= INBOUND_INACTIVITY_SECONDS:
+                logger.info("[%s] inbound inactivity %.1fs >= %.1fs -> force stop_event", call_id, idle, INBOUND_INACTIVITY_SECONDS)
+                stop_event.set()
+                return
+    except asyncio.CancelledError:
+        return
+    except Exception as e:
+        logger.warning("[%s] inactivity watchdog error: %s", call_id, e)
 
 if __name__ == "__main__":
     import uvicorn
