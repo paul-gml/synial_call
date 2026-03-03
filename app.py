@@ -837,6 +837,11 @@ async def twilio_stream(websocket: WebSocket):
         stop_event.set()
         converter.reset()
         try:
+            logger.info("[%s] Call ended. transcript_turns=%d, number_session=%s, already_sent=%s",
+                        call_id,
+                        len(prepared.transcript_turns) if prepared else 0,
+                        prepared.number_session if prepared else "N/A",
+                        prepared.transcript_sent if prepared else "N/A")
             if prepared and (not prepared.transcript_sent) and prepared.number_session and prepared.transcript_turns:
                 await asyncio.to_thread(
                     post_transcript_to_flask,
@@ -865,8 +870,16 @@ async def twilio_stream(websocket: WebSocket):
 
 
 def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) -> None:
-    if not (MAIN_APP_BASE_URL and INTERNAL_APP_TOKEN and number_session):
+    if not MAIN_APP_BASE_URL:
+        logger.error("[transcript] MAIN_APP_BASE_URL is empty! Cannot send transcript.")
         return
+    if not INTERNAL_APP_TOKEN:
+        logger.error("[transcript] INTERNAL_APP_TOKEN is empty! Cannot send transcript.")
+        return
+    if not number_session:
+        logger.error("[transcript] number_session is 0/None! Cannot send transcript.")
+        return
+    logger.info("[transcript] Sending %d turns for session %s to %s", len(turns), number_session, MAIN_APP_BASE_URL)
 
     url = f"{MAIN_APP_BASE_URL}/internal/voice/transcript"
     payload = {"number_session": number_session, "call_sid": call_sid, "turns": turns}
@@ -875,11 +888,14 @@ def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) ->
     for i in range(3):
         try:
             r = requests.post(url, json=payload, headers={"X-Internal-Token": INTERNAL_APP_TOKEN}, timeout=20)
+            logger.info("[transcript] attempt %d -> status=%s body=%s", i+1, r.status_code, r.text[:200])
             if 200 <= r.status_code < 300:
+                logger.info("[transcript] Successfully sent transcript to Flask")
                 return
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("[transcript] attempt %d failed: %s", i+1, e)
         time.sleep(0.8 * (i + 1))
+    logger.error("[transcript] ALL 3 ATTEMPTS FAILED for session=%s callSid=%s", number_session, call_sid)
 
 if __name__ == "__main__":
     import uvicorn
