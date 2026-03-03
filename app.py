@@ -837,6 +837,20 @@ async def twilio_stream(websocket: WebSocket):
 
                     if ev == "stop":
                         logger.info("[%s][twilio] stop", call_id)
+                        # Envoyer transcript MAINTENANT avant que Render coupe
+                        if prepared and (not prepared.transcript_sent) and prepared.number_session:
+                            if prepared.transcript_turns:
+                                try:
+                                    await asyncio.to_thread(
+                                        post_transcript_to_flask,
+                                        prepared.number_session,
+                                        prepared.twilio_call_sid or (ctx.call_sid or ""),
+                                        prepared.transcript_turns,
+                                    )
+                                    prepared.transcript_sent = True
+                                    logger.info("[%s] transcript sent on stop event", call_id)
+                                except Exception as e:
+                                    logger.warning("[%s] transcript send on stop failed: %s", call_id, e)
                         stop_event.set()
                         return
             except WebSocketDisconnect:
