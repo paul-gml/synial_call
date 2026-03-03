@@ -36,6 +36,9 @@ from twilio.rest import Client as TwilioClient
 from google import genai
 from google.genai import types
 import requests
+import io
+import wave
+
 
 
 # ============================================================
@@ -56,6 +59,9 @@ PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 TWILIO_SAY_BEFORE_STREAM = os.getenv("TWILIO_SAY_BEFORE_STREAM", "").strip()
 TWILIO_SAY_VOICE = os.getenv("TWILIO_SAY_VOICE", "alice").strip()
 TWILIO_SAY_LANG = os.getenv("TWILIO_SAY_LANG", "fr-FR").strip()
+
+
+TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-1.5-flash").strip()
 
 # --- Google / Vertex AI Live ---
 # Option: mettre un JSON de service account directement dans une variable.
@@ -307,7 +313,7 @@ def normalize_ai_role(s: str) -> str:
 
 def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
     kwargs: Dict[str, Any] = dict(
-        response_modalities=["AUDIO","TEXT"],
+        response_modalities=["AUDIO"],
         system_instruction=types.Content(
             role="system", parts=[types.Part.from_text(text=system_instruction_text)]
         ),
@@ -353,6 +359,8 @@ class PreparedCall:
     transcript_sent: bool = False
     last_user_tr: str = ""
     last_assistant_tr: str = ""
+    in_ulaw_frames: list[bytes] = field(default_factory=list)   # humain -> Twilio
+    out_ulaw_frames: list[bytes] = field(default_factory=list)  # IA -> humain
 
 
 PREPARED: Dict[str, PreparedCall] = {}
@@ -489,6 +497,8 @@ async def gemini_receiver_loop(
                                 out_frames_q.task_done()
                             except asyncio.QueueEmpty:
                                 pass
+                        if prepared_call is not None:
+                            prepared_call.out_ulaw_frames.append(fr)
                         await out_frames_q.put(fr)
 
     except Exception as e:
@@ -789,6 +799,8 @@ async def twilio_stream(websocket: WebSocket):
                         if not payload_b64:
                             continue
                         ulaw = base64.b64decode(payload_b64)
+                        if prepared is not None:
+                            prepared.in_ulaw_frames.append(ulaw)
                         pcm16k = converter.twilio_ulaw8k_to_gemini_pcm16k(ulaw)
                         await session.send_realtime_input(
                             audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={GEMINI_IN_RATE_HZ}")
@@ -834,21 +846,36 @@ async def twilio_stream(websocket: WebSocket):
         stop_event.set()
         converter.reset()
         try:
-            logger.info("[%s] === CALL ENDED === transcript_turns=%d, number_session=%s, already_sent=%s, MAIN_APP_BASE_URL=%s, INTERNAL_APP_TOKEN_set=%s",
+            logger.info(
+                "[%s] === CALL ENDED === transcript_turns=%d, number_session=%s, already_sent=%s, MAIN_APP_BASE_URL=%s, INTERNAL_APP_TOKEN_set=%s",
+                call_id,
+                len(prepared.transcript_turns) if prepared else 0,
+                prepared.number_session if prepared else "N/A",
+                prepared.transcript_sent if prepared else "N/A",
+                bool(MAIN_APP_BASE_URL),
+                bool(INTERNAL_APP_TOKEN),
+            )
+
+            if prepared and (not prepared.transcript_sent) and prepared.number_session:
+                if prepared.transcript_turns:
+                    await asyncio.to_thread(
+                        post_transcript_to_flask,
+                        prepared.number_session,
+                        prepared.twilio_call_sid or (ctx.call_sid or ""),
+                        prepared.transcript_turns,
+                    )
+                    prepared.transcript_sent = True
+                elif prepared.in_ulaw_frames or prepared.out_ulaw_frames:
+                    await asyncio.to_thread(
+                        transcribe_recording_and_post_to_flask,
+                        prepared.number_session,
+                        prepared.twilio_call_sid or (ctx.call_sid or ""),
+                        prepared.in_ulaw_frames,
+                        prepared.out_ulaw_frames,
                         call_id,
-                        len(prepared.transcript_turns) if prepared else 0,
-                        prepared.number_session if prepared else "N/A",
-                        prepared.transcript_sent if prepared else "N/A",
-                        bool(MAIN_APP_BASE_URL),
-                        bool(INTERNAL_APP_TOKEN))
-            if prepared and (not prepared.transcript_sent) and prepared.number_session and prepared.transcript_turns:
-                await asyncio.to_thread(
-                    post_transcript_to_flask,
-                    prepared.number_session,
-                    prepared.twilio_call_sid or (ctx.call_sid or ""),
-                    prepared.transcript_turns
-                )
-                prepared.transcript_sent = True
+                    )
+                    prepared.transcript_sent = True
+
         except Exception as e:
             logger.warning("[%s] transcript post failed: %s", call_id, e)
         if prepared is not None:
@@ -895,6 +922,122 @@ def post_transcript_to_flask(number_session: int, call_sid: str, turns: list) ->
             logger.warning("[transcript] attempt %d failed: %s", i+1, e)
         time.sleep(0.8 * (i + 1))
     logger.error("[transcript] ALL 3 ATTEMPTS FAILED for session=%s callSid=%s", number_session, call_sid)
+
+
+def transcribe_recording_and_post_to_flask(
+    number_session: int,
+    call_sid: str,
+    in_ulaw_frames: list[bytes],
+    out_ulaw_frames: list[bytes],
+    call_id: str = "unknown",
+) -> None:
+    """
+    Construit un WAV stéréo (L=inbound humain, R=outbound IA) à partir de frames µ-law 8kHz,
+    demande à Gemini une transcription structurée en JSON (turns), puis POST vers MAIN_APP_BASE_URL.
+    """
+    if not MAIN_APP_BASE_URL:
+        logger.error("[%s][audio_tx] MAIN_APP_BASE_URL empty", call_id)
+        return
+    if not INTERNAL_APP_TOKEN:
+        logger.error("[%s][audio_tx] INTERNAL_APP_TOKEN empty", call_id)
+        return
+    if not number_session:
+        logger.error("[%s][audio_tx] number_session invalid", call_id)
+        return
+    if not in_ulaw_frames and not out_ulaw_frames:
+        logger.error("[%s][audio_tx] no audio frames to transcribe", call_id)
+        return
+
+    # --- Build stereo WAV bytes (8kHz, 16-bit, 2 channels) ---
+    # Each Twilio frame is 20ms µ-law @ 8k => 160 samples => 320 bytes PCM16 mono
+    silence_pcm = b"\x00\x00" * TWILIO_FRAME_BYTES  # 160 samples, 16-bit
+
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(2)
+        wf.setsampwidth(2)   # 16-bit
+        wf.setframerate(TWILIO_RATE_HZ)
+
+        n = max(len(in_ulaw_frames), len(out_ulaw_frames))
+        for i in range(n):
+            in_ul = in_ulaw_frames[i] if i < len(in_ulaw_frames) else None
+            out_ul = out_ulaw_frames[i] if i < len(out_ulaw_frames) else None
+
+            in_pcm = audioop.ulaw2lin(in_ul, 2) if in_ul else silence_pcm
+            out_pcm = audioop.ulaw2lin(out_ul, 2) if out_ul else silence_pcm
+
+            # Left = inbound, Right = outbound
+            left_only = audioop.tostereo(in_pcm, 2, 1.0, 0.0)
+            right_only = audioop.tostereo(out_pcm, 2, 0.0, 1.0)
+            stereo = audioop.add(left_only, right_only, 2)
+
+            wf.writeframes(stereo)
+
+    wav_bytes = buf.getvalue()
+    logger.info("[%s][audio_tx] wav built: %d bytes (frames_in=%d frames_out=%d)",
+                call_id, len(wav_bytes), len(in_ulaw_frames), len(out_ulaw_frames))
+
+    # --- Ask Gemini to transcribe into JSON turns ---
+    prompt = (
+        "Tu vas recevoir un fichier audio WAV stéréo d'un appel.\n"
+        "Canal GAUCHE = interlocuteur humain.\n"
+        "Canal DROIT = voix de l'IA (synthèse).\n\n"
+        "Tâche: transcris fidèlement la conversation en français et retourne UNIQUEMENT un JSON strict.\n"
+        "Format attendu: une liste de tours, ex:\n"
+        "[{\"role\":\"user\",\"text\":\"...\"},{\"role\":\"assistant\",\"text\":\"...\"}, ...]\n"
+        "Contraintes:\n"
+        "- role doit être exactement 'user' (humain) ou 'assistant' (IA)\n"
+        "- pas de texte hors JSON\n"
+        "- regroupe en phrases naturelles (pas mot-à-mot si ça dégrade)\n"
+    )
+
+    try:
+        client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+        resp = client.models.generate_content(
+            model=TRANSCRIBE_MODEL,
+            contents=[
+                types.Content(
+                    role="user",
+                    parts=[
+                        types.Part.from_text(text=prompt),
+                        types.Part(inline_data=types.Blob(data=wav_bytes, mime_type="audio/wav")),
+                    ],
+                )
+            ],
+        )
+        raw = (getattr(resp, "text", None) or "").strip()
+    except Exception as e:
+        logger.error("[%s][audio_tx] Gemini transcription failed: %s", call_id, e)
+        traceback.print_exc()
+        return
+
+    if not raw:
+        logger.error("[%s][audio_tx] empty transcription result", call_id)
+        return
+
+    # Try to extract JSON (in case model adds whitespace)
+    json_txt = raw
+    # If it accidentally wrapped, try to cut to first '[' ... last ']'
+    if "[" in raw and "]" in raw:
+        json_txt = raw[raw.find("[") : raw.rfind("]") + 1]
+
+    turns = None
+    try:
+        turns = json.loads(json_txt)
+        if not isinstance(turns, list):
+            turns = None
+    except Exception:
+        turns = None
+
+    if not turns:
+        # fallback: send one big system turn
+        logger.warning("[%s][audio_tx] JSON parse failed, fallback to single turn", call_id)
+        turns = [{"role": "system", "text": raw}]
+
+    # --- Post to Flask using existing endpoint ---
+    logger.info("[%s][audio_tx] posting %d turns to Flask session=%s", call_id, len(turns), number_session)
+    post_transcript_to_flask(number_session, call_sid, turns)
+
 
 if __name__ == "__main__":
     import uvicorn
