@@ -643,12 +643,6 @@ async def gemini_receiver_loop(
 
                     frames = converter.gemini_pcm_to_twilio_ulaw_frames(pcm_bytes, pcm_rate_hz=pcm_rate)
                     for fr in frames:
-                        if out_frames_q.full():
-                            try:
-                                out_frames_q.get_nowait()
-                                out_frames_q.task_done()
-                            except asyncio.QueueEmpty:
-                                pass
                         if prepared_call is not None:
                             prepared_call.out_ulaw_frames.append(fr)
                         await out_frames_q.put(fr)
@@ -669,7 +663,6 @@ async def twilio_sender_loop(
 ) -> None:
     try:
         await ctx.started.wait()
-        next_send_time = time.monotonic()
 
         while not stop_event.is_set():
             frame = await out_frames_q.get()
@@ -678,22 +671,12 @@ async def twilio_sender_loop(
                 out_frames_q.task_done()
                 continue
 
-            duration = len(frame) / float(TWILIO_RATE_HZ)
-            now = time.monotonic()
-            if next_send_time > now:
-                await asyncio.sleep(next_send_time - now)
-            else:
-                # On est en retard -> recaler pour éviter l'accélération
-                next_send_time = now
-
             payload_b64 = base64.b64encode(frame).decode("ascii")
             await ws_send_json(
                 websocket,
                 send_lock,
                 {"event": "media", "streamSid": ctx.stream_sid, "media": {"payload": payload_b64}},
             )
-
-            next_send_time += duration
             out_frames_q.task_done()
 
     except WebSocketDisconnect:
@@ -893,7 +876,7 @@ async def twilio_stream(websocket: WebSocket):
     ctx = StreamContext()
     stop_event = asyncio.Event()
     converter = AudioConverter()
-    out_frames_q: asyncio.Queue = asyncio.Queue(maxsize=OUT_QUEUE_MAX_FRAMES)
+    out_frames_q: asyncio.Queue = asyncio.Queue(maxsize=0)  # 0 = illimité
 
     call_id = "unknown"
     prepared: Optional[PreparedCall] = None
