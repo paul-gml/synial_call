@@ -69,8 +69,8 @@ INBOUND_INACTIVITY_SECONDS = float(os.getenv("INBOUND_INACTIVITY_SECONDS", "20")
 VOICE_POOL_BY_ROLE = {
     "journaliste":      ["Kore", "Pulcherrima", "Erinome",       # femmes
                           "Rasalgethi", "Fenrir"],                 # hommes
-    "prefet":           ["Charon", "Sadaltager", "Orus", "Schedar"],
-    "colonel_pompiers": ["Orus", "Algenib", "Gacrux", "Charon"],
+    "prefet":           ["Orus"],
+    "colonel_pompiers": ["Gacrux"],
 }
 MALE_VOICES = ["Charon", "Orus", "Fenrir", "Puck"]
 FEMALE_VOICES = ["Kore", "Aoede", "Leda", "Zephyr"]
