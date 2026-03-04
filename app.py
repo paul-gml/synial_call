@@ -110,7 +110,6 @@ OUT_QUEUE_MAX_FRAMES = int(os.getenv("OUT_QUEUE_MAX_FRAMES", "250"))
 PREPARED_SESSION_TTL_SECONDS = int(os.getenv("PREPARED_SESSION_TTL_SECONDS", "90"))
 
 # --- Auto hangup ---
-AUTO_HANGUP_ON_GOODBYE = os.getenv("AUTO_HANGUP_ON_GOODBYE", "true").lower() in ("1", "true", "yes", "y")
 HANGUP_DELAY_SECONDS = float(os.getenv("HANGUP_DELAY_SECONDS", "2"))
 GOODBYE_REGEX = re.compile(r"\b(au\s+revoir|bonne\s+journ[eé]e|bye|à\s+bient[ôo]t|ciao)\b", re.IGNORECASE)
 
@@ -584,28 +583,6 @@ class StreamContext:
     started: asyncio.Event = field(default_factory=asyncio.Event)
     last_inbound_ts: float = 0.0
 
-async def inbound_inactivity_watchdog(ctx: StreamContext, stop_event: asyncio.Event, call_id: str) -> None:
-    """
-    Force la fin côté serveur si plus aucun audio inbound (Twilio media inbound) depuis N secondes.
-    """
-    try:
-        # On attend le démarrage effectif du stream
-        await ctx.started.wait()
-        # Init : si rien n'est encore arrivé, on met maintenant
-        if not ctx.last_inbound_ts:
-            ctx.last_inbound_ts = time.time()
-
-        while not stop_event.is_set():
-            await asyncio.sleep(1.0)
-            idle = time.time() - (ctx.last_inbound_ts or 0.0)
-            if idle >= INBOUND_INACTIVITY_SECONDS:
-                logger.info("[%s] inbound inactivity %.1fs >= %.1fs -> force stop_event", call_id, idle, INBOUND_INACTIVITY_SECONDS)
-                stop_event.set()
-                return
-    except asyncio.CancelledError:
-        return
-    except Exception as e:
-        logger.warning("[%s] inactivity watchdog error: %s", call_id, e)
 
 async def gemini_receiver_loop(
     websocket: WebSocket,
@@ -618,17 +595,6 @@ async def gemini_receiver_loop(
     call_id: str,
     prepared_call: Optional[PreparedCall]) -> None:
     twilio_call_sid = prepared_call.twilio_call_sid if prepared_call else None
-    async def _hangup_later(delay_s: float) -> None:
-        if not (AUTO_HANGUP_ON_GOODBYE and twilio_call_sid):
-            return
-        await asyncio.sleep(max(0.0, delay_s))
-        try:
-            await asyncio.to_thread(_twilio_hangup_call, twilio_call_sid)
-            logger.info("[%s] auto-hangup done callSid=%s", call_id, twilio_call_sid)
-        except Exception as e:
-            logger.warning("[%s] auto-hangup failed: %s", call_id, e)
-
-    hangup_scheduled = False
 
     try:
         while not stop_event.is_set():
@@ -651,10 +617,6 @@ async def gemini_receiver_loop(
                             prepared_call.last_assistant_tr = txt
                             prepared_call.transcript_turns.append({"role": "assistant", "text": txt})
                         logger.info("[%s][assistant] %s", call_id, txt)
-
-                        if AUTO_HANGUP_ON_GOODBYE and (not hangup_scheduled) and GOODBYE_REGEX.search(txt or ""):
-                            hangup_scheduled = True
-                            asyncio.create_task(_hangup_later(HANGUP_DELAY_SECONDS))
 
                 if not server_content:
                     continue
@@ -720,6 +682,9 @@ async def twilio_sender_loop(
             now = time.monotonic()
             if next_send_time > now:
                 await asyncio.sleep(next_send_time - now)
+            else:
+                # On est en retard -> recaler pour éviter l'accélération
+                next_send_time = now
 
             payload_b64 = base64.b64encode(frame).decode("ascii")
             await ws_send_json(
@@ -865,7 +830,15 @@ async def api_prepare_call(request: Request):
 
         def _do_call() -> str:
             client = _twilio_client()
-            call = client.calls.create(to=to_number, from_=TWILIO_FROM_NUMBER, twiml=twiml)
+            call = client.calls.create(
+                to=to_number,
+                from_=TWILIO_FROM_NUMBER,
+                twiml=twiml,
+                machine_detection="Enable",
+                async_amd=True,
+                async_amd_status_callback=f"{PUBLIC_BASE_URL}/twilio/amd_callback",
+                async_amd_status_callback_method="POST",
+            )
             return call.sid
 
         twilio_call_sid = await asyncio.to_thread(_do_call)
@@ -894,6 +867,23 @@ async def twilio_voice(request: Request):
     twiml = build_twiml_stream(stream_ws_url, custom_parameters={"role": "journalist"})
     return Response(content=twiml, media_type="application/xml; charset=utf-8")
 
+@app.api_route("/twilio/amd_callback", methods=["GET", "POST"])
+async def twilio_amd_callback(request: Request):
+    """Twilio AMD (Answering Machine Detection) callback."""
+    form = await request.form()
+    call_sid = str(form.get("CallSid", ""))
+    answered_by = str(form.get("AnsweredBy", ""))
+    logger.info("[amd] callSid=%s answeredBy=%s", call_sid, answered_by)
+
+    # Si répondeur -> raccrocher
+    if answered_by in ("machine_start", "machine_end_beep", "machine_end_silence", "machine_end_other", "fax"):
+        try:
+            await asyncio.to_thread(_twilio_hangup_call, call_sid)
+            logger.info("[amd] hangup machine call callSid=%s", call_sid)
+        except Exception as e:
+            logger.warning("[amd] hangup failed: %s", e)
+
+    return Response(content="", status_code=200)
 
 @app.websocket("/twilio/stream")
 async def twilio_stream(websocket: WebSocket):
@@ -954,6 +944,7 @@ async def twilio_stream(websocket: WebSocket):
                 expires_at=time.time() + PREPARED_SESSION_TTL_SECONDS,
                 to_number="",
                 player_name="Joueur",
+                player_role="",
                 system_instruction=system_instruction,
                 gemini_client=gemini_client,
                 gemini_cm=cm,
@@ -1040,8 +1031,7 @@ async def twilio_stream(websocket: WebSocket):
             )
         )
         t_send = asyncio.create_task(twilio_sender_loop(websocket, send_lock, ctx, stop_event, out_frames_q, call_id))
-        t_idle = asyncio.create_task(inbound_inactivity_watchdog(ctx, stop_event, call_id))
-        done, pending = await asyncio.wait({t_in, t_out, t_send, t_idle}, return_when=asyncio.FIRST_EXCEPTION)
+        done, pending = await asyncio.wait({t_in, t_out, t_send}, return_when=asyncio.FIRST_EXCEPTION)
 
         for task in done:
             exc = task.exception()
