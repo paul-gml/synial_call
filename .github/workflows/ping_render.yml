@@ -10,4 +10,4 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render service
-        run: curl -I https://synial-call.onrender.com/
+        run: curl -fsS https://synial-call.onrender.com/health >/dev/null
