@@ -38,6 +38,7 @@ from google.genai import types
 import requests
 import io
 import wave
+import random
 
 
 
@@ -64,6 +65,16 @@ TWILIO_SAY_LANG = os.getenv("TWILIO_SAY_LANG", "fr-FR").strip()
 TRANSCRIBE_MODEL = os.getenv("TRANSCRIBE_MODEL", "gemini-1.5-flash").strip()
 INBOUND_INACTIVITY_SECONDS = float(os.getenv("INBOUND_INACTIVITY_SECONDS", "20"))
 
+
+VOICE_POOL_BY_ROLE = {
+    "journaliste":      ["Kore", "Pulcherrima", "Erinome",       # femmes
+                          "Rasalgethi", "Fenrir"],                 # hommes
+    "prefet":           ["Charon", "Sadaltager", "Orus", "Schedar"],
+    "colonel_pompiers": ["Orus", "Algenib", "Gacrux", "Charon"],
+}
+MALE_VOICES = ["Charon", "Orus", "Fenrir", "Puck"]
+FEMALE_VOICES = ["Kore", "Aoede", "Leda", "Zephyr"]
+
 # --- Google / Vertex AI Live ---
 # Option: mettre un JSON de service account directement dans une variable.
 GCP_CREDS_JSON = os.getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON", "").strip()
@@ -83,7 +94,6 @@ PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "
 LOCATION = (os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GOOGLE_CLOUD_REGION") or "us-central1").strip()
 
 MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-live-2.5-flash-native-audio").strip()
-VOICE_NAME = os.getenv("GEMINI_VOICE_NAME", "Kore").strip()
 
 ENABLE_TRANSCRIPTIONS = os.getenv("ENABLE_TRANSCRIPTIONS", "true").lower() in ("1", "true", "yes", "y")
 
@@ -505,7 +515,7 @@ def normalize_ai_role(s: str) -> str:
     return s or "journaliste"
 
 
-def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
+def build_live_config(system_instruction_text: str, voice_name: str = "Kore") -> types.LiveConnectConfig:
     kwargs: Dict[str, Any] = dict(
         response_modalities=["AUDIO"],
         system_instruction=types.Content(
@@ -513,7 +523,7 @@ def build_live_config(system_instruction_text: str) -> types.LiveConnectConfig:
         ),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=VOICE_NAME)
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice_name)
             )
         ),
     )
@@ -848,10 +858,13 @@ async def api_prepare_call(request: Request):
         )
     else:
         system_instruction = base
-    config = build_live_config(system_instruction)
-
     call_id = uuid.uuid4().hex
     t0 = time.time()
+
+    voice_pool = VOICE_POOL_BY_ROLE.get(ai_role, ["Kore", "Charon", "Orus", "Fenrir"])
+    voice_name = random.choice(voice_pool)
+    logger.info("[%s] selected voice=%s for role=%s", call_id, voice_name, ai_role)
+    config = build_live_config(system_instruction, voice_name=voice_name)
 
     try:
         gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
@@ -967,7 +980,8 @@ async def twilio_stream(websocket: WebSocket):
                 fallback_number_session = 0
 
             system_instruction = BASE_SYSTEM_TEMPLATE.format(player_name="Joueur")
-            config = build_live_config(system_instruction)
+            fallback_voice = random.choice(MALE_VOICES + FEMALE_VOICES)
+            config = build_live_config(system_instruction, voice_name=fallback_voice)
             gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
             cm = gemini_client.aio.live.connect(model=MODEL_ID, config=config)
             session = await cm.__aenter__()
