@@ -1216,7 +1216,7 @@ def transcribe_recording_and_post_to_flask(
                 call_id, len(wav_bytes), len(in_ulaw_frames), len(out_ulaw_frames))
 
     # --- Ask Gemini to transcribe into JSON turns ---
-prompt = (
+    prompt = (
     "Tu vas recevoir un fichier audio WAV stéréo d'un appel téléphonique.\n"
     "Canal GAUCHE = interlocuteur humain.\n"
     "Canal DROIT = voix de l'IA (synthèse).\n\n"
