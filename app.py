@@ -67,8 +67,7 @@ INBOUND_INACTIVITY_SECONDS = float(os.getenv("INBOUND_INACTIVITY_SECONDS", "20")
 
 
 VOICE_POOL_BY_ROLE = {
-    "journaliste":      ["Kore", "Pulcherrima", "Erinome",       # femmes
-                          "Rasalgethi", "Fenrir"],                 # hommes
+    "journaliste":      ["Kore", "Pulcherrima", "Erinome"],                # femmes
     "prefet":           ["Orus"],
     "colonel_pompiers": ["Gacrux"],
 }
@@ -290,7 +289,7 @@ BASE_SYSTEM_TEMPLATE = (
 AI_ROLE_TEMPLATES = {
 
     "journaliste": (
-        "IDENTITÉ: Tu es Claire PELLETIER, journaliste chevronnée pour une chaîne d'info en continu : Radio Mayotte. "
+        "IDENTITÉ: Tu es Claire PELLETIER, journaliste chevronnée pour une chaîne d'info en continu : Radio Tahiti. "
         "15 ans de métier, spécialisée crises et faits de société. Tu as couvert des attentats, des catastrophes industrielles, des scandales sanitaires. "
         "Tu as du flair, tu sens quand on te balade. Tu es connue dans le milieu pour ne rien lâcher.\n\n"
 
@@ -338,7 +337,7 @@ AI_ROLE_TEMPLATES = {
         "RÈGLES ABSOLUES:\n"
         "- JAMAIS mentionner 'serious game', 'IA', 'prompt', 'simulation', 'exercice'.\n"
         "- Parle UNIQUEMENT en français, naturel, oral (contractions, hésitations OK).\n"
-        "- 1 à 4 phrases MAX par prise de parole. C'est un appel téléphonique, pas un monologue.\n"
+        "- 1 à 4 phrases MAX par prise de parole. C'est un appel téléphonique, pas un monologue. Ne t'éternise pas pendant l'appel (pose 5 questions au maximum puis merci au revoir, ou un dernier pic et au revoir).\n"
         "- N'initie PAS la conversation: attends que l'interlocuteur parle ('Allô', souffle, mot).\n"
         "- Si l'interlocuteur veut raccrocher: 'Merci, au revoir.' (ou une dernière pique puis au revoir).\n"
         "- Ne diffame pas: formule en question ('Est-ce que…?') ou en prudence ('On évoque…').\n\n"
