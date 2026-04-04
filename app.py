@@ -289,7 +289,7 @@ BASE_SYSTEM_TEMPLATE = (
 AI_ROLE_TEMPLATES = {
 
     "journaliste": (
-        "IDENTITÉ: Tu es Claire PELLETIER, journaliste chevronnée pour une chaîne d'info en continu : BFMTV. "
+        "IDENTITÉ: Tu es Claire PELLETIER, journaliste chevronnée pour une chaîne d'info en continu : Radio Tahiti. "
         "15 ans de métier, spécialisée crises et faits de société. Tu as couvert des attentats, des catastrophes industrielles, des scandales sanitaires. "
         "Tu as du flair, tu sens quand on te balade. Tu es connue dans le milieu pour ne rien lâcher.\n\n"
 
@@ -467,6 +467,28 @@ AI_ROLE_TEMPLATES = {
         "Dites-moi ce que vous avez comme infos de votre côté.'"
     ),
 }
+def build_call_origin_instruction(initiated_by: str) -> str:
+    """
+    Ajoute une consigne d'amorce différente selon qui a déclenché l'appel.
+    - admin  : c'est le personnage IA qui appelle
+    - player : c'est le joueur qui a demandé à être joint
+    """
+    if initiated_by == "player":
+        return (
+            "\n\nORIGINE DE L'APPEL:\n"
+            "- L'interlocuteur a demandé à te joindre et reçoit maintenant l'appel.\n"
+            "- N'agis PAS comme si c'était toi qui avais spontanément pris l'initiative de le contacter.\n"
+            "- Après avoir entendu 'Allô', ouvre naturellement comme quelqu'un qu'on a cherché à joindre.\n"
+            "- Exemples de ton attendu : 'Bonjour, vous avez cherché à me joindre ?' / "
+            "'Bonjour, vous vouliez me contacter ?'.\n"
+            "- Ensuite, enchaîne normalement avec tes questions, réponses ou relances.\n"
+        )
+
+    return (
+        "\n\nORIGINE DE L'APPEL:\n"
+        "- C'est toi qui as pris l'initiative de contacter l'interlocuteur.\n"
+        "- Après avoir entendu 'Allô', présente-toi immédiatement et explique brièvement pourquoi tu appelles.\n"
+    )
 
 def normalize_ai_role(s: str) -> str:
     s = (s or "").strip().lower()
@@ -507,6 +529,8 @@ class PreparedCall:
     player_name: str
     player_role: str
     system_instruction: str
+    initiated_by: str = "admin"
+    ai_role: str = "journaliste"
 
     gemini_client: Any
     gemini_cm: Any
@@ -741,6 +765,9 @@ async def api_prepare_call(request: Request):
     number_session = int(body.get("number_session") or 0)
     history_text = str(body.get("history_text") or "").strip()
     player_role = str(body.get("player_role") or "").strip()
+    initiated_by = str(body.get("initiated_by") or "admin").strip().lower()
+    if initiated_by not in {"admin", "player"}:
+        initiated_by = "admin"
     ai_role = normalize_ai_role(str(body.get("ai_role") or "journaliste"))
     if ai_role not in AI_ROLE_TEMPLATES:
         ai_role = "journaliste"
@@ -754,6 +781,8 @@ async def api_prepare_call(request: Request):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
     base = AI_ROLE_TEMPLATES[ai_role].format(player_name=player_name)
+    base += build_call_origin_instruction(initiated_by)
+
     if player_role:
         base += "\n\nINFO INTERLOCUTEUR:\n- Poste / fonction pendant la crise : " + player_role
 
@@ -793,6 +822,8 @@ async def api_prepare_call(request: Request):
         player_name=player_name,
         player_role=player_role,
         system_instruction=system_instruction,
+        initiated_by=initiated_by,
+        ai_role=ai_role,
         gemini_client=gemini_client,
         gemini_cm=cm,
         gemini_session=session,
@@ -807,8 +838,15 @@ async def api_prepare_call(request: Request):
     try:
         stream_ws_url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream")
         twiml = build_twiml_stream(
-        stream_ws_url,
-        custom_parameters={"call_id": call_id, "ai_role": ai_role, "number_session": str(number_session)})
+            stream_ws_url,
+            custom_parameters={
+                "call_id": call_id,
+                "ai_role": ai_role,
+                "number_session": str(number_session),
+                "initiated_by": initiated_by,
+                "player_name": player_name[:80],
+            }
+        )
 
         def _do_call() -> str:
             client = _twilio_client()
@@ -907,15 +945,28 @@ async def twilio_stream(websocket: WebSocket):
         if prepared is None:
             logger.warning("[%s] no prepared session found -> fallback connect (latency likely)", call_id)
 
-            # ✅ Récupérer number_session depuis les customParameters Twilio
             try:
                 fallback_number_session = int(ctx.custom_parameters.get("number_session") or 0)
             except Exception:
                 fallback_number_session = 0
 
-            system_instruction = BASE_SYSTEM_TEMPLATE.format(player_name="Joueur")
-            fallback_voice = random.choice(MALE_VOICES + FEMALE_VOICES)
-            config = build_live_config(system_instruction, voice_name=fallback_voice)
+            fallback_player_name = str(ctx.custom_parameters.get("player_name") or "Joueur").strip() or "Joueur"
+
+            fallback_initiated_by = str(ctx.custom_parameters.get("initiated_by") or "admin").strip().lower()
+            if fallback_initiated_by not in {"admin", "player"}:
+                fallback_initiated_by = "admin"
+
+            fallback_ai_role = normalize_ai_role(str(ctx.custom_parameters.get("ai_role") or "journaliste"))
+            if fallback_ai_role not in AI_ROLE_TEMPLATES:
+                fallback_ai_role = "journaliste"
+
+            fallback_base = AI_ROLE_TEMPLATES[fallback_ai_role].format(player_name=fallback_player_name)
+            fallback_system_instruction = fallback_base + build_call_origin_instruction(fallback_initiated_by)
+
+            fallback_voice_pool = VOICE_POOL_BY_ROLE.get(fallback_ai_role, MALE_VOICES + FEMALE_VOICES)
+            fallback_voice = random.choice(fallback_voice_pool)
+
+            config = build_live_config(fallback_system_instruction, voice_name=fallback_voice)
             gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
             cm = gemini_client.aio.live.connect(model=MODEL_ID, config=config)
             session = await cm.__aenter__()
@@ -925,16 +976,18 @@ async def twilio_stream(websocket: WebSocket):
                 created_at=time.time(),
                 expires_at=time.time() + PREPARED_SESSION_TTL_SECONDS,
                 to_number="",
-                player_name="Joueur",
+                player_name=fallback_player_name,
                 player_role="",
-                system_instruction=system_instruction,
+                system_instruction=fallback_system_instruction,
+                initiated_by=fallback_initiated_by,
+                ai_role=fallback_ai_role,
                 gemini_client=gemini_client,
                 gemini_cm=cm,
                 gemini_session=session,
                 twilio_call_sid=ctx.call_sid,
                 twilio_stream_sid=ctx.stream_sid,
                 state="in_call",
-                number_session=fallback_number_session,  # ✅ important
+                number_session=fallback_number_session,
             )
         else:
             if prepared.cleanup_task:
@@ -991,6 +1044,8 @@ async def twilio_stream(websocket: WebSocket):
                                         prepared.twilio_call_sid or (ctx.call_sid or ""),
                                         prepared.transcript_turns,
                                         prepared.player_name,
+                                        prepared.initiated_by,
+                                        prepared.ai_role,
                                     )
                                     prepared.transcript_sent = True
                                     logger.info("[%s] transcript sent on stop event", call_id)
@@ -1049,6 +1104,9 @@ async def twilio_stream(websocket: WebSocket):
                         prepared.number_session,
                         prepared.twilio_call_sid or (ctx.call_sid or ""),
                         prepared.transcript_turns,
+                        prepared.player_name,
+                        prepared.initiated_by,
+                        prepared.ai_role,
                     )
                     prepared.transcript_sent = True
                 elif prepared.in_ulaw_frames or prepared.out_ulaw_frames:
@@ -1059,6 +1117,9 @@ async def twilio_stream(websocket: WebSocket):
                         prepared.in_ulaw_frames,
                         prepared.out_ulaw_frames,
                         call_id,
+                        prepared.player_name,
+                        prepared.initiated_by,
+                        prepared.ai_role,
                     )
                     prepared.transcript_sent = True
 
@@ -1081,7 +1142,14 @@ async def twilio_stream(websocket: WebSocket):
             pass
 
 
-def post_transcript_to_flask(number_session: int, call_sid: str, turns: list, player_name: str = "Joueur") -> None:
+def post_transcript_to_flask(
+    number_session: int,
+    call_sid: str,
+    turns: list,
+    player_name: str = "Joueur",
+    initiated_by: str = "admin",
+    ai_role: str = "journaliste",
+) -> None:
     if not MAIN_APP_BASE_URL:
         logger.error("[transcript] MAIN_APP_BASE_URL is empty! Cannot send transcript.")
         return
@@ -1094,7 +1162,14 @@ def post_transcript_to_flask(number_session: int, call_sid: str, turns: list, pl
     logger.info("[transcript] Sending %d turns for session %s to %s", len(turns), number_session, MAIN_APP_BASE_URL)
 
     url = f"{MAIN_APP_BASE_URL}/internal/voice/transcript"
-    payload = {"number_session": number_session, "call_sid": call_sid, "turns": turns, "player_name": player_name}
+    payload = {
+        "number_session": number_session,
+        "call_sid": call_sid,
+        "turns": turns,
+        "player_name": player_name,
+        "initiated_by": initiated_by,
+        "ai_role": ai_role,
+    }
 
     # retry simple
     for i in range(3):
@@ -1116,6 +1191,9 @@ def transcribe_recording_and_post_to_flask(
     in_ulaw_frames: list[bytes],
     out_ulaw_frames: list[bytes],
     call_id: str = "unknown",
+    player_name: str = "Joueur",
+    initiated_by: str = "admin",
+    ai_role: str = "journaliste",
 ) -> None:
     """
     Construit un WAV stéréo (L=inbound humain, R=outbound IA) à partir de frames µ-law 8kHz,
@@ -1193,7 +1271,7 @@ def transcribe_recording_and_post_to_flask(
     "Règles d’inférence du ton (indicatives):\n"
     "- mentionner si perceptible: interruptions, hésitations, contradictions, silences, rires, hausse de rythme/voix, reproches, empathie.\n"
     "- si ton difficile à inférer: écrire 'ton difficile à inférer'.\n\n"
-    "IMPORTANT: ne pas recopier mot pour mot. Prioriser ce qui aide la suite du jeu: décisions, contraintes, risques, intentions, dynamique relationnelle."
+    "IMPORTANT: ne pas recopier mot pour mot. Prioriser ce qui aide la suite du jeu: décisions, contraintes, risques, intentions, dynamique relationnelle. ET ENFIN ESSENTIEL : A LA FIN DIS QUE CET APPEL DOIT ETRE PRIS EN COMPTE DANS L EVOLUTION DU SCENARIO."
 )
 
     try:
@@ -1240,15 +1318,8 @@ def transcribe_recording_and_post_to_flask(
         turns = [{"role": "system", "text": raw}]
 
     # --- Post to Flask using existing endpoint ---
-    # --- Post to Flask using existing endpoint ---
-    # --- Post to Flask using existing endpoint ---
-    logger.info("[%s][audio_tx] posting %d turns to Flask session=%s (Background Task)", call_id, len(turns), number_session)
-    
-    # On délègue l'envoi à un thread séparé pour libérer immédiatement le flux audio
-    try:
-        asyncio.create_task(asyncio.to_thread(post_transcript_to_flask, number_session, call_sid, turns))
-    except Exception as e:
-        logger.error("[%s][audio_tx] Failed to trigger background post: %s", call_id, e)
+    logger.info("[%s][audio_tx] posting %d turns to Flask session=%s", call_id, len(turns), number_session)
+    post_transcript_to_flask(number_session, call_sid, turns, player_name, initiated_by, ai_role)
 
 
 if __name__ == "__main__":
