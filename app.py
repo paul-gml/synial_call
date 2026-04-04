@@ -1240,8 +1240,15 @@ def transcribe_recording_and_post_to_flask(
         turns = [{"role": "system", "text": raw}]
 
     # --- Post to Flask using existing endpoint ---
-    logger.info("[%s][audio_tx] posting %d turns to Flask session=%s", call_id, len(turns), number_session)
-    post_transcript_to_flask(number_session, call_sid, turns)
+    # --- Post to Flask using existing endpoint ---
+    # --- Post to Flask using existing endpoint ---
+    logger.info("[%s][audio_tx] posting %d turns to Flask session=%s (Background Task)", call_id, len(turns), number_session)
+    
+    # On délègue l'envoi à un thread séparé pour libérer immédiatement le flux audio
+    try:
+        asyncio.create_task(asyncio.to_thread(post_transcript_to_flask, number_session, call_sid, turns))
+    except Exception as e:
+        logger.error("[%s][audio_tx] Failed to trigger background post: %s", call_id, e)
 
 
 if __name__ == "__main__":
