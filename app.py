@@ -529,12 +529,13 @@ class PreparedCall:
     player_name: str
     player_role: str
     system_instruction: str
-    initiated_by: str = "admin"
-    ai_role: str = "journaliste"
 
     gemini_client: Any
     gemini_cm: Any
     gemini_session: Any
+
+    initiated_by: str = "admin"
+    ai_role: str = "journaliste"
 
     twilio_call_sid: Optional[str] = None
     twilio_stream_sid: Optional[str] = None
