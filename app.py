@@ -1106,7 +1106,20 @@ async def twilio_stream(websocket: WebSocket):
                         logger.info("[%s][twilio] stop", call_id)
                         if prepared and (not prepared.transcript_sent) and prepared.number_session:
                             try:
-                                if prepared.in_ulaw_frames or prepared.out_ulaw_frames:
+                                if prepared.transcript_turns:
+                                    await asyncio.to_thread(
+                                        post_transcript_to_flask,
+                                        prepared.number_session,
+                                        prepared.twilio_call_sid or (ctx.call_sid or ""),
+                                        prepared.transcript_turns,
+                                        prepared.player_name,
+                                        prepared.initiated_by,
+                                        prepared.ai_role,
+                                    )
+                                    prepared.transcript_sent = True
+                                    logger.info("[%s] live transcript sent on stop event", call_id)
+
+                                elif prepared.in_ulaw_frames or prepared.out_ulaw_frames:
                                     await asyncio.to_thread(
                                         transcribe_recording_and_post_to_flask,
                                         prepared.number_session,
@@ -1119,9 +1132,11 @@ async def twilio_stream(websocket: WebSocket):
                                         prepared.ai_role,
                                     )
                                     prepared.transcript_sent = True
-                                    logger.info("[%s] structured summary sent on stop event", call_id)
+                                    logger.info("[%s] audio fallback sent on stop event", call_id)
+
                                 else:
-                                    logger.warning("[%s] no audio frames available for structured summary", call_id)
+                                    logger.warning("[%s] no transcript turns and no audio frames", call_id)
+
                             except Exception as e:
                                 logger.warning("[%s] transcript send on stop failed: %s", call_id, e)
 
@@ -1172,7 +1187,20 @@ async def twilio_stream(websocket: WebSocket):
             )
 
             if prepared and (not prepared.transcript_sent) and prepared.number_session:
-                if prepared.in_ulaw_frames or prepared.out_ulaw_frames:
+                if prepared.transcript_turns:
+                    await asyncio.to_thread(
+                        post_transcript_to_flask,
+                        prepared.number_session,
+                        prepared.twilio_call_sid or (ctx.call_sid or ""),
+                        prepared.transcript_turns,
+                        prepared.player_name,
+                        prepared.initiated_by,
+                        prepared.ai_role,
+                    )
+                    prepared.transcript_sent = True
+                    logger.info("[%s] live transcript sent in finally", call_id)
+
+                elif prepared.in_ulaw_frames or prepared.out_ulaw_frames:
                     await asyncio.to_thread(
                         transcribe_recording_and_post_to_flask,
                         prepared.number_session,
@@ -1185,8 +1213,10 @@ async def twilio_stream(websocket: WebSocket):
                         prepared.ai_role,
                     )
                     prepared.transcript_sent = True
+                    logger.info("[%s] audio fallback sent in finally", call_id)
+
                 else:
-                    logger.warning("[%s] no audio frames available for structured summary in finally", call_id)
+                    logger.warning("[%s] no transcript turns and no audio frames in finally", call_id)
 
         except Exception as e:
             logger.warning("[%s] transcript post failed: %s", call_id, e)
