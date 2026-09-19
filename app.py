@@ -25,6 +25,7 @@ import uuid
 import asyncio
 import logging
 import traceback
+import hmac
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
@@ -88,6 +89,13 @@ if GCP_CREDS_JSON and not os.getenv("GOOGLE_APPLICATION_CREDENTIALS"):
 
 MAIN_APP_BASE_URL = os.getenv("MAIN_APP_BASE_URL", "").strip().rstrip("/")  # ex: https://synial.onrender.com
 INTERNAL_APP_TOKEN = os.getenv("INTERNAL_APP_TOKEN", "").strip()           # = INTERNAL_VOICE_TOKEN côté Flask
+
+# --- Casque Quest standalone ---
+# Secret distinct de la clé d'administration : il n'est jamais renvoyé ni journalisé.
+QUEST_DEVICE_TOKEN = os.getenv("QUEST_DEVICE_TOKEN", "").strip()
+QUEST_DEVICE_TIMEOUT_SECONDS = max(20, int(os.getenv("QUEST_DEVICE_TIMEOUT_SECONDS", "45")))
+QUEST_LONG_POLL_SECONDS = min(25, max(5, int(os.getenv("QUEST_LONG_POLL_SECONDS", "20"))))
+QUEST_DEVICE_ID = "quest-main"
 
 PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "").strip()
 LOCATION = (os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GOOGLE_CLOUD_REGION") or "us-central1").strip()
@@ -616,6 +624,124 @@ PREPARED: Dict[str, PreparedCall] = {}
 PREPARED_LOCK = asyncio.Lock()
 
 
+# ============================================================
+# 6b) Quest standalone store (un casque, une commande maximum)
+# ============================================================
+
+@dataclass
+class QuestDeviceState:
+    device_id: str
+    last_seen: float = 0.0
+    waiting: bool = False
+    pending_launch_id: Optional[str] = None
+    active_launch_id: Optional[str] = None
+
+
+@dataclass
+class QuestLaunchState:
+    launch_id: str
+    device_id: str
+    command: Dict[str, Any]
+    state: str = "pending"  # pending -> claimed -> started -> completed
+    created_at: float = field(default_factory=time.time)
+    claimed_at: Optional[float] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+    transcript_forwarded: bool = False
+    transcript_forwarding: bool = False
+
+
+QUEST_DEVICES: Dict[str, QuestDeviceState] = {
+    QUEST_DEVICE_ID: QuestDeviceState(device_id=QUEST_DEVICE_ID),
+}
+QUEST_LAUNCHES: Dict[str, QuestLaunchState] = {}
+QUEST_LOCK = asyncio.Lock()
+
+
+def _require_admin_api_key(request: Request) -> None:
+    if not VOICE_ADMIN_API_KEY:
+        raise HTTPException(status_code=500, detail="VOICE_ADMIN_API_KEY must be set")
+    supplied = request.headers.get("X-API-Key", "").strip()
+    if not hmac.compare_digest(supplied, VOICE_ADMIN_API_KEY):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _require_quest_token(request: Request) -> None:
+    if not QUEST_DEVICE_TOKEN:
+        raise HTTPException(status_code=503, detail="QUEST_DEVICE_TOKEN must be set")
+    supplied = request.headers.get("X-Quest-Token", "").strip()
+    if not hmac.compare_digest(supplied, QUEST_DEVICE_TOKEN):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _quest_device_or_404(device_id: str) -> QuestDeviceState:
+    device = QUEST_DEVICES.get(device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Casque Quest inconnu.")
+    return device
+
+
+def _quest_is_available(device: QuestDeviceState, now: Optional[float] = None) -> bool:
+    current = time.time() if now is None else now
+    fresh = bool(device.last_seen and current - device.last_seen <= QUEST_DEVICE_TIMEOUT_SECONDS)
+    return fresh and device.waiting and not device.pending_launch_id and not device.active_launch_id
+
+
+def _clean_quest_text(value: Any, max_length: int, default: str = "") -> str:
+    text_value = str(value or "").strip()
+    if not text_value:
+        return default
+    return text_value[:max_length]
+
+
+def _quest_public_status(device: QuestDeviceState) -> Dict[str, Any]:
+    available = _quest_is_available(device)
+    launch_id = device.active_launch_id or device.pending_launch_id
+    launch = QUEST_LAUNCHES.get(launch_id or "")
+    return {
+        "ok": True,
+        "device_id": device.device_id,
+        "label": "Quest principal",
+        "available": available,
+        "status": "Disponible" if available else "Indisponible",
+        "launch_id": launch_id,
+        "launch_state": launch.state if launch else None,
+    }
+
+
+def _quest_release_previous_active_launch(device: QuestDeviceState) -> None:
+    """A new explicit wait session supersedes an interview lost with the old app process."""
+    if not device.active_launch_id:
+        return
+    previous = QUEST_LAUNCHES.get(device.active_launch_id)
+    if previous and previous.state in {"claimed", "started"}:
+        previous.state = "abandoned"
+    device.active_launch_id = None
+
+
+def _forward_quest_transcript_to_flask(payload: Dict[str, Any]) -> tuple[bool, str]:
+    if not MAIN_APP_BASE_URL:
+        return False, "MAIN_APP_BASE_URL is not configured"
+    if not INTERNAL_APP_TOKEN:
+        return False, "INTERNAL_APP_TOKEN is not configured"
+    try:
+        response = requests.post(
+            f"{MAIN_APP_BASE_URL}/internal/quest/transcript",
+            json=payload,
+            headers={"X-Internal-Token": INTERNAL_APP_TOKEN},
+            timeout=20,
+        )
+    except requests.RequestException as exc:
+        return False, f"Main SYNIAL site unreachable: {type(exc).__name__}"
+    if 200 <= response.status_code < 300:
+        return True, ""
+    try:
+        detail = str((response.json() or {}).get("detail") or "")
+    except Exception:
+        detail = ""
+    return False, detail or f"Main SYNIAL site returned HTTP {response.status_code}"
+
+
 async def _close_prepared_call(call_id: str, reason: str) -> None:
     async with PREPARED_LOCK:
         pc = PREPARED.pop(call_id, None)
@@ -799,6 +925,260 @@ async def health():
         "public_base_url": PUBLIC_BASE_URL,
         "prepared_sessions": len(PREPARED),
     }
+
+
+@app.post("/api/quest/devices/{device_id}/heartbeat")
+async def quest_device_heartbeat(device_id: str, request: Request):
+    _require_quest_token(request)
+    device = _quest_device_or_404(device_id)
+    body = await request.json()
+    wants_waiting = bool(body.get("waiting", True))
+    async with QUEST_LOCK:
+        if wants_waiting:
+            _quest_release_previous_active_launch(device)
+        device.last_seen = time.time()
+        device.waiting = wants_waiting and not device.active_launch_id
+        return _quest_public_status(device)
+
+
+@app.get("/api/quest/devices/{device_id}/poll")
+async def quest_device_poll(device_id: str, request: Request, timeout_seconds: int = QUEST_LONG_POLL_SECONDS):
+    """Long-poll. Claiming is atomic and removes the one pending command immediately."""
+    _require_quest_token(request)
+    device = _quest_device_or_404(device_id)
+    wait_seconds = min(QUEST_LONG_POLL_SECONDS, max(1, int(timeout_seconds)))
+    deadline = time.monotonic() + wait_seconds
+
+    while True:
+        async with QUEST_LOCK:
+            if device.active_launch_id:
+                _quest_release_previous_active_launch(device)
+            device.last_seen = time.time()
+            if not device.active_launch_id:
+                device.waiting = True
+            launch_id = device.pending_launch_id
+            launch = QUEST_LAUNCHES.get(launch_id or "")
+            if launch and launch.state == "pending" and not device.active_launch_id:
+                device.pending_launch_id = None
+                device.active_launch_id = launch.launch_id
+                device.waiting = False
+                launch.state = "claimed"
+                launch.claimed_at = time.time()
+                return {"ok": True, "command": launch.command}
+
+        if time.monotonic() >= deadline:
+            return Response(status_code=204)
+        await asyncio.sleep(0.25)
+
+
+@app.post("/api/quest/devices/{device_id}/leave")
+async def quest_device_leave(device_id: str, request: Request):
+    _require_quest_token(request)
+    device = _quest_device_or_404(device_id)
+    async with QUEST_LOCK:
+        device.last_seen = time.time()
+        device.waiting = False
+        if device.pending_launch_id:
+            launch = QUEST_LAUNCHES.get(device.pending_launch_id)
+            if launch and launch.state == "pending":
+                launch.state = "cancelled"
+            device.pending_launch_id = None
+        return {"ok": True}
+
+
+@app.get("/api/quest/devices/{device_id}/status")
+async def quest_device_status(device_id: str, request: Request):
+    _require_admin_api_key(request)
+    device = _quest_device_or_404(device_id)
+    async with QUEST_LOCK:
+        return _quest_public_status(device)
+
+
+@app.post("/api/quest/launch")
+async def quest_launch(request: Request):
+    _require_admin_api_key(request)
+    body = await request.json()
+    launch_id = _clean_quest_text(body.get("launch_id"), 64)
+    device_id = _clean_quest_text(body.get("device_id"), 64)
+    experience_type = _clean_quest_text(body.get("experience_type"), 48).lower()
+    try:
+        uuid.UUID(launch_id)
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="launch_id invalide.")
+    if device_id != QUEST_DEVICE_ID:
+        raise HTTPException(status_code=404, detail="Casque Quest inconnu.")
+    if experience_type != "journaliste":
+        raise HTTPException(status_code=400, detail="Expérience Quest non prise en charge.")
+    try:
+        number_session = int(body.get("number_session") or 0)
+    except (TypeError, ValueError):
+        number_session = 0
+    if number_session <= 0:
+        raise HTTPException(status_code=400, detail="number_session invalide.")
+
+    command = {
+        "launch_id": launch_id,
+        "number_session": number_session,
+        "device_id": device_id,
+        "experience_type": experience_type,
+        "player_name": _clean_quest_text(body.get("player_name"), 160, "Joueur"),
+        "player_role": _clean_quest_text(body.get("player_role"), 240),
+        "ai_role": _clean_quest_text(body.get("ai_role"), 64, "journaliste"),
+        "system_instruction": _clean_quest_text(body.get("system_instruction"), 30000),
+        "scenario_context": _clean_quest_text(body.get("scenario_context"), 300000),
+    }
+
+    async with QUEST_LOCK:
+        existing = QUEST_LAUNCHES.get(launch_id)
+        if existing:
+            if existing.device_id != device_id or existing.command != command:
+                raise HTTPException(status_code=409, detail="launch_id déjà utilisé avec une autre commande.")
+            return {
+                "ok": True,
+                "launch_id": launch_id,
+                "state": existing.state,
+                "message": "Simulation envoyée",
+                "duplicate": True,
+            }
+
+        device = _quest_device_or_404(device_id)
+        if not _quest_is_available(device):
+            raise HTTPException(status_code=409, detail="Casque Quest introuvable ou non disponible.")
+
+        launch = QuestLaunchState(launch_id=launch_id, device_id=device_id, command=command)
+        QUEST_LAUNCHES[launch_id] = launch
+        device.pending_launch_id = launch_id
+        device.waiting = True
+
+    logger.info("[quest] launch queued id=%s device=%s session=%s", launch_id, device_id, number_session)
+    return Response(
+        content=json.dumps({
+            "ok": True,
+            "launch_id": launch_id,
+            "state": "pending",
+            "message": "Simulation envoyée",
+        }),
+        status_code=202,
+        media_type="application/json",
+    )
+
+
+@app.get("/api/quest/launch/{launch_id}")
+async def quest_launch_status(launch_id: str, request: Request):
+    _require_admin_api_key(request)
+    async with QUEST_LOCK:
+        launch = QUEST_LAUNCHES.get(launch_id)
+        if not launch:
+            raise HTTPException(status_code=404, detail="Simulation Quest inconnue.")
+        return {
+            "ok": True,
+            "launch_id": launch.launch_id,
+            "device_id": launch.device_id,
+            "state": launch.state,
+            "started": launch.state in {"started", "completed"},
+            "completed": launch.state == "completed",
+        }
+
+
+@app.post("/api/quest/launch/{launch_id}/started")
+async def quest_launch_started(launch_id: str, request: Request):
+    _require_quest_token(request)
+    body = await request.json()
+    device_id = _clean_quest_text(body.get("device_id"), 64)
+    async with QUEST_LOCK:
+        launch = QUEST_LAUNCHES.get(launch_id)
+        if not launch or launch.device_id != device_id:
+            raise HTTPException(status_code=404, detail="Simulation Quest inconnue.")
+        if launch.state == "completed":
+            return {"ok": True, "launch_id": launch_id, "state": launch.state, "duplicate": True}
+        if launch.state not in {"claimed", "started"}:
+            raise HTTPException(status_code=409, detail="La simulation n'a pas été récupérée par ce casque.")
+        launch.state = "started"
+        launch.started_at = launch.started_at or time.time()
+    logger.info("[quest] launch started id=%s device=%s", launch_id, device_id)
+    return {"ok": True, "launch_id": launch_id, "state": "started"}
+
+
+@app.post("/api/quest/launch/{launch_id}/transcript")
+async def quest_launch_transcript(launch_id: str, request: Request):
+    _require_quest_token(request)
+    body = await request.json()
+    device_id = _clean_quest_text(body.get("device_id"), 64)
+    try:
+        uuid.UUID(launch_id)
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="launch_id invalide.")
+    if device_id != QUEST_DEVICE_ID:
+        raise HTTPException(status_code=404, detail="Casque Quest inconnu.")
+    turns = body.get("turns")
+    if not isinstance(turns, list):
+        raise HTTPException(status_code=400, detail="Transcript invalide.")
+
+    async with QUEST_LOCK:
+        launch = QUEST_LAUNCHES.get(launch_id)
+        if launch:
+            if launch.device_id != device_id:
+                raise HTTPException(status_code=404, detail="Simulation Quest inconnue.")
+            if launch.transcript_forwarded:
+                return {"ok": True, "ack": True, "duplicate": True, "launch_id": launch_id}
+            if launch.transcript_forwarding:
+                raise HTTPException(status_code=409, detail="Transcript en cours de traitement, réessayez.")
+            if launch.state not in {"claimed", "started"}:
+                raise HTTPException(status_code=409, detail="État de simulation incompatible avec le transcript.")
+            if int(body.get("number_session") or 0) != int(launch.command["number_session"]):
+                raise HTTPException(status_code=400, detail="number_session ne correspond pas à la simulation.")
+            forward_payload = {
+                "launch_id": launch_id,
+                "number_session": launch.command["number_session"],
+                "experience_type": launch.command["experience_type"],
+                "player_name": launch.command["player_name"],
+                "player_role": launch.command["player_role"],
+                "ai_role": launch.command["ai_role"],
+                "turns": turns[:500],
+            }
+            launch.transcript_forwarding = True
+        else:
+            # Un ACK peut avoir été perdu juste avant un redémarrage Render.
+            # Le casque authentifié renvoie alors son payload local; Flask garde
+            # l'idempotence durable grâce à la clé unique launch_id.
+            try:
+                number_session = int(body.get("number_session") or 0)
+            except (TypeError, ValueError):
+                number_session = 0
+            if number_session <= 0:
+                raise HTTPException(status_code=400, detail="number_session invalide.")
+            experience_type = _clean_quest_text(body.get("experience_type"), 48).lower()
+            if experience_type != "journaliste":
+                raise HTTPException(status_code=400, detail="Expérience Quest non prise en charge.")
+            forward_payload = {
+                "launch_id": launch_id,
+                "number_session": number_session,
+                "experience_type": experience_type,
+                "player_name": _clean_quest_text(body.get("player_name"), 160, "Joueur"),
+                "player_role": _clean_quest_text(body.get("player_role"), 240),
+                "ai_role": _clean_quest_text(body.get("ai_role"), 64, "journaliste"),
+                "turns": turns[:500],
+            }
+
+    success, detail = await asyncio.to_thread(_forward_quest_transcript_to_flask, forward_payload)
+
+    async with QUEST_LOCK:
+        launch = QUEST_LAUNCHES.get(launch_id)
+        if launch:
+            launch.transcript_forwarding = False
+        if not success:
+            raise HTTPException(status_code=502, detail=detail)
+        if launch:
+            launch.transcript_forwarded = True
+            launch.state = "completed"
+            launch.completed_at = time.time()
+        device = QUEST_DEVICES.get(device_id)
+        if device and device.active_launch_id == launch_id:
+            device.active_launch_id = None
+            device.waiting = False
+
+    logger.info("[quest] transcript acknowledged id=%s device=%s", launch_id, device_id)
+    return {"ok": True, "ack": True, "launch_id": launch_id}
 
 
 @app.post("/api/prepare_call")
