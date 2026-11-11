@@ -131,14 +131,20 @@ def test_missing_openai_key_does_not_dial(voice_settings, monkeypatch):
     assert 'OPENAI_API_KEY' in response.json()['detail']
 
 
-@pytest.mark.parametrize('role', ['journaliste', 'prefet', 'colonel_pompiers'])
-def test_scenario_dossier_is_available_before_the_first_event(role):
+@pytest.mark.parametrize(('role', 'player_cue', 'admin_cue'), [
+    ('journaliste', 'Je prépare mon direct, faites vite', 'C\'est toi qui cherches le scoop'),
+    ('prefet', 'Je suis en réunion', 'Tu prends l\'initiative pour obtenir un bilan'),
+    ('colonel_pompiers', 'Je suis avec mes équipes', 'Tu appelles parce qu\'un renseignement'),
+])
+def test_call_origin_selects_one_role_opening_without_losing_scenario(role, player_cue, admin_cue):
     dossier = 'Situation : accident sur la RD 973.\n\nJalon futur : conférence à 17h30.'
     history = ('SESSION 18 — HISTORIQUE FACTUEL\n\n[CONTEXTE INITIAL DE LA SIMULATION]\n\n'
                + dossier + '\n\n[FIN DU CONTEXTE INITIAL]\n\n[TOURS ET ÉVÉNEMENTS]')
-    config = live.phone_session(role, 'player', '', history)
-    assert dossier in config['input'][0]['content'][0]['text']
-    assert 'Avant le premier événement' in config['instructions']
+    for origin, expected, excluded in [('player', player_cue, admin_cue), ('admin', admin_cue, player_cue)]:
+        config = live.phone_session(role, origin, '', history)
+        assert dossier in config['input'][0]['content'][0]['text']
+        assert 'Avant le premier événement' in config['instructions']
+        assert expected in config['instructions'] and excluded not in config['instructions']
 
 
 def test_provider_rejection_closes_socket_without_dialling(voice_settings, monkeypatch):
