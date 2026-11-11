@@ -2,9 +2,9 @@
 """
 voice_journalist_service.py
 
-Service voix "Journaliste" : Twilio (Media Streams) <-> Gemini Live (Vertex AI)
+Service voix SYNIAL : Twilio (Media Streams) <-> GPT-Live (Gemini en repli manuel)
 
-- /api/prepare_call : (protégé) préchauffe Gemini Live, puis lance un appel Twilio sortant
+- /api/prepare_call : (protégé) prépare le moteur vocal, puis lance un appel Twilio sortant
 - /twilio/stream    : WebSocket Twilio Media Streams (bidirectionnel) + bridge audio temps réel
 
 ⚠️ IMPORTANT :
@@ -37,6 +37,8 @@ from twilio.rest import Client as TwilioClient
 from google import genai
 from google.genai import types
 import requests
+import websockets
+import openai_live_phone
 import io
 import wave
 import random
@@ -96,6 +98,12 @@ QUEST_DEVICE_TOKEN = os.getenv("QUEST_DEVICE_TOKEN", "").strip()
 QUEST_DEVICE_TIMEOUT_SECONDS = max(20, int(os.getenv("QUEST_DEVICE_TIMEOUT_SECONDS", "45")))
 QUEST_LONG_POLL_SECONDS = min(25, max(5, int(os.getenv("QUEST_LONG_POLL_SECONDS", "20"))))
 QUEST_DEVICE_ID = "quest-main"
+
+# OpenAI project credentials remain on this trusted service. The Quest only
+# authenticates to the relay with its existing device token.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_LIVE_WEBSOCKET_URL = "wss://api.openai.com/v1/live/sessions"
+VOICE_CALL_PROVIDER = os.getenv("VOICE_CALL_PROVIDER", "openai").strip().lower()
 
 PROJECT_ID = (os.getenv("GOOGLE_CLOUD_PROJECT") or os.getenv("GCP_PROJECT") or "").strip()
 LOCATION = (os.getenv("GOOGLE_CLOUD_LOCATION") or os.getenv("GOOGLE_CLOUD_REGION") or "us-central1").strip()
@@ -241,12 +249,12 @@ class AudioConverter:
         self._out_ratecv_state = None
         self._out_ulaw_buffer.clear()
 
-    def twilio_ulaw8k_to_gemini_pcm16k(self, ulaw: bytes) -> bytes:
+    def twilio_ulaw8k_to_pcm(self, ulaw: bytes, output_rate: int) -> bytes:
         pcm8k = audioop.ulaw2lin(ulaw, 2)
-        pcm16k, self._in_ratecv_state = audioop.ratecv(
-            pcm8k, 2, 1, TWILIO_RATE_HZ, GEMINI_IN_RATE_HZ, self._in_ratecv_state
+        pcm, self._in_ratecv_state = audioop.ratecv(
+            pcm8k, 2, 1, TWILIO_RATE_HZ, output_rate, self._in_ratecv_state
         )
-        return pcm16k
+        return pcm
 
     def gemini_pcm_to_twilio_ulaw_frames(self, pcm: bytes, pcm_rate_hz: int) -> list[bytes]:
         pcm8k, self._out_ratecv_state = audioop.ratecv(
@@ -603,6 +611,8 @@ class PreparedCall:
 
     initiated_by: str = "admin"
     ai_role: str = "journaliste"
+    provider: str = "gemini"
+    stream_token: str = field(default="", repr=False)
 
     twilio_call_sid: Optional[str] = None
     twilio_stream_sid: Optional[str] = None
@@ -656,6 +666,8 @@ QUEST_DEVICES: Dict[str, QuestDeviceState] = {
 }
 QUEST_LAUNCHES: Dict[str, QuestLaunchState] = {}
 QUEST_LOCK = asyncio.Lock()
+QUEST_OPENAI_RELAY_LOCK = asyncio.Lock()
+QUEST_OPENAI_RELAY_ACTIVE = False
 
 
 def _require_admin_api_key(request: Request) -> None:
@@ -672,6 +684,14 @@ def _require_quest_token(request: Request) -> None:
     supplied = request.headers.get("X-Quest-Token", "").strip()
     if not hmac.compare_digest(supplied, QUEST_DEVICE_TOKEN):
         raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _quest_websocket_is_authorized(websocket: WebSocket) -> bool:
+    """Authenticate without ever putting the device token in a URL or log."""
+    if not QUEST_DEVICE_TOKEN:
+        return False
+    supplied = websocket.headers.get("X-Quest-Token", "").strip()
+    return hmac.compare_digest(supplied, QUEST_DEVICE_TOKEN)
 
 
 def _quest_device_or_404(device_id: str) -> QuestDeviceState:
@@ -752,7 +772,7 @@ async def _close_prepared_call(call_id: str, reason: str) -> None:
     async with pc.lock:
         pc.state = "ended"
 
-    if pc.cleanup_task:
+    if pc.cleanup_task and pc.cleanup_task is not asyncio.current_task():
         try:
             pc.cleanup_task.cancel()
         except Exception:
@@ -761,7 +781,7 @@ async def _close_prepared_call(call_id: str, reason: str) -> None:
     try:
         await pc.gemini_cm.__aexit__(None, None, None)
     except Exception as e:
-        logger.warning("[%s] failed to close Gemini session (%s): %s", call_id, reason, e)
+        logger.warning("[%s] failed to close voice session (%s): %s", call_id, reason, type(e).__name__)
 
 
 async def _cleanup_expired_call(call_id: str) -> None:
@@ -862,6 +882,31 @@ async def gemini_receiver_loop(
         stop_event.set()
 
 
+async def openai_phone_receiver_loop(session, converter, out_frames_q, prepared, stop_event):
+    deltas = []
+    try:
+        async for raw in session:
+            event = json.loads(raw)
+            kind = event.get("type")
+            if kind == "session.closed":
+                return
+            if kind == "error":
+                raise RuntimeError("GPT-Live phone session failed")
+            delta = event.get("delta")
+            if not isinstance(delta, str) or not delta:
+                continue
+            if kind == "session.output_audio.delta" and not stop_event.is_set():
+                pcm = base64.b64decode(delta, validate=True)
+                for frame in converter.gemini_pcm_to_twilio_ulaw_frames(pcm, openai_live_phone.RATE):
+                    await out_frames_q.put(frame)
+            elif ENABLE_TRANSCRIPTIONS and kind in ("session.input_transcript.delta", "session.output_transcript.delta"):
+                role = "user" if kind == "session.input_transcript.delta" else "assistant"
+                stamp = event.get("start_ms")
+                deltas.append((stamp if isinstance(stamp, int) else 0, role, delta))
+    finally:
+        prepared.transcript_turns.extend(openai_live_phone.transcript_turns(deltas))
+
+
 async def twilio_sender_loop(
     websocket: WebSocket,
     send_lock: asyncio.Lock,
@@ -911,7 +956,7 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-    return {"ok": True, "service": "voice_journalist", "model": MODEL_ID}
+    return {"ok": True, "service": "voice_journalist", "model": openai_live_phone.MODEL if VOICE_CALL_PROVIDER == "openai" else MODEL_ID}
 
 
 @app.get("/health")
@@ -920,7 +965,9 @@ async def health():
         "ok": True,
         "project": PROJECT_ID,
         "location": LOCATION,
-        "model": MODEL_ID,
+        "model": openai_live_phone.MODEL if VOICE_CALL_PROVIDER == "openai" else MODEL_ID,
+        "phone_provider": VOICE_CALL_PROVIDER,
+        "phone_provider_configured": bool(OPENAI_API_KEY if VOICE_CALL_PROVIDER == "openai" else PROJECT_ID),
         "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER),
         "public_base_url": PUBLIC_BASE_URL,
         "prepared_sessions": len(PREPARED),
@@ -984,6 +1031,104 @@ async def quest_device_leave(device_id: str, request: Request):
                 launch.state = "cancelled"
             device.pending_launch_id = None
         return {"ok": True}
+
+
+@app.websocket("/api/quest/openai/live")
+async def quest_openai_live_relay(websocket: WebSocket):
+    """Transparent full-duplex GPT-Live relay for the standalone Quest.
+
+    The client sends the official Live JSON protocol unchanged. This service
+    contributes only server-side OpenAI authentication and never inspects or
+    logs transcript/audio payloads.
+    """
+    global QUEST_OPENAI_RELAY_ACTIVE
+
+    if not _quest_websocket_is_authorized(websocket):
+        await websocket.close(code=1008)
+        return
+    if not OPENAI_API_KEY:
+        await websocket.accept()
+        await websocket.send_json({
+            "type": "error",
+            "error": {"message": "OpenAI Live is not configured on the SYNIAL backend."},
+        })
+        await websocket.close(code=1011)
+        return
+
+    async with QUEST_OPENAI_RELAY_LOCK:
+        if QUEST_OPENAI_RELAY_ACTIVE:
+            await websocket.accept()
+            await websocket.send_json({
+                "type": "error",
+                "error": {"message": "The Quest OpenAI Live relay is already in use."},
+            })
+            await websocket.close(code=1013)
+            return
+        QUEST_OPENAI_RELAY_ACTIVE = True
+
+    client_messages = 0
+    upstream_messages = 0
+    try:
+        await websocket.accept()
+        async with websockets.connect(
+            OPENAI_LIVE_WEBSOCKET_URL,
+            extra_headers={"Authorization": f"Bearer {OPENAI_API_KEY}"},
+            origin=None,
+            max_size=8 * 1024 * 1024,
+            ping_interval=20,
+            ping_timeout=20,
+            close_timeout=5,
+        ) as upstream:
+            logger.info("[quest-openai] live relay connected")
+
+            async def quest_to_openai() -> None:
+                nonlocal client_messages
+                while True:
+                    message = await websocket.receive_text()
+                    client_messages += 1
+                    await upstream.send(message)
+
+            async def openai_to_quest() -> None:
+                nonlocal upstream_messages
+                async for message in upstream:
+                    upstream_messages += 1
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = {
+                asyncio.create_task(quest_to_openai()),
+                asyncio.create_task(openai_to_quest()),
+            }
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+    except WebSocketDisconnect:
+        pass
+    except websockets.exceptions.ConnectionClosed:
+        pass
+    except Exception as exc:
+        logger.warning("[quest-openai] relay failed: %s", type(exc).__name__)
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "error": {"message": "The OpenAI Live relay connection failed."},
+            })
+            await websocket.close(code=1011)
+        except Exception:
+            pass
+    finally:
+        async with QUEST_OPENAI_RELAY_LOCK:
+            QUEST_OPENAI_RELAY_ACTIVE = False
+        logger.info(
+            "[quest-openai] live relay closed client_messages=%d upstream_messages=%d",
+            client_messages,
+            upstream_messages,
+        )
 
 
 @app.get("/api/quest/devices/{device_id}/status")
@@ -1192,7 +1337,12 @@ async def api_prepare_call(request: Request):
 
     try:
         _require_env("PUBLIC_BASE_URL", PUBLIC_BASE_URL)
-        _require_env("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+        if VOICE_CALL_PROVIDER == "openai":
+            _require_env("OPENAI_API_KEY", OPENAI_API_KEY)
+        elif VOICE_CALL_PROVIDER == "gemini":
+            _require_env("GOOGLE_CLOUD_PROJECT", PROJECT_ID)
+        else:
+            raise ValueError("VOICE_CALL_PROVIDER must be openai or gemini")
         _require_env("TWILIO_FROM_NUMBER", TWILIO_FROM_NUMBER)
         _require_env("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID)
         _require_env("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN)
@@ -1211,7 +1361,7 @@ async def api_prepare_call(request: Request):
     ai_role = normalize_ai_role(str(body.get("ai_role") or "journaliste"))
     if ai_role not in AI_ROLE_TEMPLATES:
         ai_role = "journaliste"
-    if len(history_text) > 80000:
+    if VOICE_CALL_PROVIDER == "gemini" and len(history_text) > 80000:
         history_text = history_text[-80000:]
 
     if not to_number or not validate_e164(to_number):
@@ -1220,38 +1370,32 @@ async def api_prepare_call(request: Request):
     if ALLOWED_TO_PREFIXES and not any(to_number.startswith(p) for p in ALLOWED_TO_PREFIXES):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
-    base = AI_ROLE_TEMPLATES[ai_role].format(player_name=player_name)
-    base += build_call_origin_instruction(initiated_by)
-
-    if player_role:
-        base += "\n\nINFO INTERLOCUTEUR:\n- Poste / fonction pendant la crise : " + player_role
-
-    if history_text:
-        system_instruction = (
-            base
-            + "\n\n--- HISTORIQUE RECENT (chat) ---\n"
-            + history_text
-            + "\n--- FIN HISTORIQUE ---\n"
-            + "Consigne: utilise cet historique pour contextualiser tes questions."
-        )
-    else:
-        system_instruction = base
     call_id = uuid.uuid4().hex
     t0 = time.time()
 
-    voice_pool = VOICE_POOL_BY_ROLE.get(ai_role, ["Kore", "Charon", "Orus", "Fenrir"])
-    voice_name = random.choice(voice_pool)
-    logger.info("[%s] selected voice=%s for role=%s", call_id, voice_name, ai_role)
-    config = build_live_config(system_instruction, voice_name=voice_name)
-
     try:
-        gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
-        cm = gemini_client.aio.live.connect(model=MODEL_ID, config=config)
+        gemini_client = None
+        if VOICE_CALL_PROVIDER == "openai":
+            config = openai_live_phone.phone_session(ai_role, initiated_by, player_role, history_text)
+            system_instruction = config["instructions"]
+            cm = openai_live_phone.connect(OPENAI_API_KEY, config)
+        else:
+            system_instruction = AI_ROLE_TEMPLATES[ai_role].format(player_name=player_name)
+            system_instruction += build_call_origin_instruction(initiated_by)
+            if player_role:
+                system_instruction += "\n\nINFO INTERLOCUTEUR:\n- Poste / fonction pendant la crise : " + player_role
+            if history_text:
+                system_instruction += ("\n\n--- HISTORIQUE RECENT (chat) ---\n" + history_text
+                                       + "\n--- FIN HISTORIQUE ---\n"
+                                       + "Consigne: utilise cet historique pour contextualiser tes questions.")
+            voice_name = random.choice(VOICE_POOL_BY_ROLE[ai_role])
+            config = build_live_config(system_instruction, voice_name=voice_name)
+            gemini_client = genai.Client(vertexai=True, project=PROJECT_ID, location=LOCATION)
+            cm = gemini_client.aio.live.connect(model=MODEL_ID, config=config)
         session = await cm.__aenter__()
     except Exception as e:
-        logger.error("[%s] failed to connect Gemini Live: %s", call_id, e)
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Gemini connect failed: {e}")
+        logger.error("[%s] voice connection failed provider=%s error_type=%s", call_id, VOICE_CALL_PROVIDER, type(e).__name__)
+        raise HTTPException(status_code=502, detail="Le moteur vocal est indisponible. Aucun appel n'a été lancé.") from None
 
     pc = PreparedCall(
         number_session=number_session,
@@ -1264,6 +1408,8 @@ async def api_prepare_call(request: Request):
         system_instruction=system_instruction,
         initiated_by=initiated_by,
         ai_role=ai_role,
+        provider=VOICE_CALL_PROVIDER,
+        stream_token=uuid.uuid4().hex,
         gemini_client=gemini_client,
         gemini_cm=cm,
         gemini_session=session,
@@ -1281,6 +1427,7 @@ async def api_prepare_call(request: Request):
             stream_ws_url,
             custom_parameters={
                 "call_id": call_id,
+                "stream_token": pc.stream_token,
                 "ai_role": ai_role,
                 "number_session": str(number_session),
                 "initiated_by": initiated_by,
@@ -1305,22 +1452,24 @@ async def api_prepare_call(request: Request):
 
         async with pc.lock:
             pc.twilio_call_sid = twilio_call_sid
-            pc.state = "calling"
+            if pc.state == "ready":
+                pc.state = "calling"
 
         prep_ms = int((time.time() - t0) * 1000)
-        logger.info("[%s] prepared Gemini + started Twilio callSid=%s in %sms", call_id, twilio_call_sid, prep_ms)
+        logger.info("[%s] prepared %s + started Twilio callSid=%s in %sms", call_id, pc.provider, twilio_call_sid, prep_ms)
 
         return {"ok": True, "call_id": call_id, "call_sid": twilio_call_sid, "prep_ms": prep_ms}
 
     except Exception as e:
-        logger.error("[%s] failed to create Twilio call: %s", call_id, e)
-        traceback.print_exc()
+        logger.error("[%s] Twilio call creation failed: %s", call_id, type(e).__name__)
         await _close_prepared_call(call_id, reason="twilio_create_failed")
-        raise HTTPException(status_code=500, detail=f"Twilio call failed: {e}")
+        raise HTTPException(status_code=502, detail="Twilio n'a pas pu lancer l'appel.") from None
 
 
 @app.api_route("/twilio/voice", methods=["GET", "POST"])
 async def twilio_voice(request: Request):
+    if VOICE_CALL_PROVIDER != "gemini":
+        raise HTTPException(status_code=404, detail="Utilisez le lancement d’appel SYNIAL.")
     if not PUBLIC_BASE_URL:
         raise HTTPException(status_code=500, detail="PUBLIC_BASE_URL must be set")
 
@@ -1363,7 +1512,8 @@ async def twilio_stream(websocket: WebSocket):
     ctx = StreamContext()
     stop_event = asyncio.Event()
     converter = AudioConverter()
-    out_frames_q: asyncio.Queue = asyncio.Queue(maxsize=0)  # 0 = illimité
+    out_frames_q: asyncio.Queue = asyncio.Queue(maxsize=OUT_QUEUE_MAX_FRAMES)
+    tasks = set()
 
     call_id = "unknown"
     prepared: Optional[PreparedCall] = None
@@ -1390,9 +1540,26 @@ async def twilio_stream(websocket: WebSocket):
 
         # 2) Get prepared (warm) session
         async with PREPARED_LOCK:
-            prepared = PREPARED.get(call_id)
+            candidate = PREPARED.get(call_id)
+            if candidate is not None:
+                async with candidate.lock:
+                    if (candidate.state not in {"ready", "calling"} or candidate.expires_at <= time.time()
+                            or (candidate.provider == "openai" and not hmac.compare_digest(
+                                candidate.stream_token.encode(), str(ctx.custom_parameters.get("stream_token") or "").encode()
+                            ))
+                            or not ctx.stream_sid or not ctx.call_sid
+                            or (candidate.twilio_call_sid and candidate.twilio_call_sid != ctx.call_sid)):
+                        await websocket.close(code=1008)
+                        return
+                    candidate.twilio_call_sid = ctx.call_sid
+                    candidate.twilio_stream_sid = ctx.stream_sid
+                    candidate.state = "in_call"
+                    prepared = candidate
 
         if prepared is None:
+            if VOICE_CALL_PROVIDER != "gemini":
+                await websocket.close(code=1008)
+                return
             logger.warning("[%s] no prepared session found -> fallback connect (latency likely)", call_id)
 
             try:
@@ -1446,12 +1613,6 @@ async def twilio_stream(websocket: WebSocket):
                 except Exception:
                     pass
 
-            async with prepared.lock:
-                prepared.twilio_stream_sid = ctx.stream_sid
-                if ctx.call_sid:
-                    prepared.twilio_call_sid = ctx.call_sid
-                prepared.state = "in_call"
-
         session = prepared.gemini_session
 
         async def _twilio_receiver_after_start():
@@ -1474,17 +1635,20 @@ async def twilio_stream(websocket: WebSocket):
                             continue
                         ulaw = base64.b64decode(payload_b64)
                         ctx.last_inbound_ts = time.time()
-                        if prepared is not None:
+                        if prepared.provider == "openai":
+                            pcm = converter.twilio_ulaw8k_to_pcm(ulaw, openai_live_phone.RATE)
+                            await openai_live_phone.send_audio(session, pcm)
+                        else:
                             prepared.in_ulaw_frames.append(ulaw)
-                        pcm16k = converter.twilio_ulaw8k_to_gemini_pcm16k(ulaw)
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={GEMINI_IN_RATE_HZ}")
-                        )
+                            pcm16k = converter.twilio_ulaw8k_to_pcm(ulaw, GEMINI_IN_RATE_HZ)
+                            await session.send_realtime_input(
+                                audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={GEMINI_IN_RATE_HZ}")
+                            )
                         continue
 
                     if ev == "stop":
                         logger.info("[%s][twilio] stop", call_id)
-                        if prepared and (not prepared.transcript_sent) and prepared.number_session:
+                        if prepared.provider == "gemini" and (not prepared.transcript_sent) and prepared.number_session:
                             try:
                                 if prepared.transcript_turns:
                                     await asyncio.to_thread(
@@ -1526,34 +1690,44 @@ async def twilio_stream(websocket: WebSocket):
                 logger.info("[%s][twilio] websocket disconnected", call_id)
                 stop_event.set()
             except Exception as e:
-                logger.error("[%s][twilio] receiver-after-start error: %s", call_id, e)
-                traceback.print_exc()
+                logger.error("[%s][twilio] receiver-after-start error: %s", call_id, type(e).__name__)
                 stop_event.set()
 
         t_in = asyncio.create_task(_twilio_receiver_after_start())
         t_out = asyncio.create_task(
-            gemini_receiver_loop(
+            openai_phone_receiver_loop(session, converter, out_frames_q, prepared, stop_event)
+            if prepared.provider == "openai" else gemini_receiver_loop(
                 websocket, send_lock, session, ctx, stop_event, converter, out_frames_q, call_id, prepared
             )
         )
         t_send = asyncio.create_task(twilio_sender_loop(websocket, send_lock, ctx, stop_event, out_frames_q, call_id))
-        done, pending = await asyncio.wait({t_in, t_out, t_send}, return_when=asyncio.FIRST_EXCEPTION)
+        tasks = {t_in, t_out, t_send}
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 
         for task in done:
             exc = task.exception()
             if exc:
                 raise exc
 
-        for task in pending:
-            task.cancel()
+        if prepared.provider == "openai" and t_in in done and not t_out.done():
+            stop_event.set()
+            try:
+                await asyncio.wait_for(openai_live_phone.send(session, "session.close"), timeout=1)
+                await asyncio.wait({t_out}, timeout=2)
+            except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                pass
 
     except WebSocketDisconnect:
         logger.info("[%s][twilio] websocket disconnected (top)", call_id)
     except Exception as e:
-        logger.error("[%s] twilio_stream error: %s", call_id, e)
-        traceback.print_exc()
+        logger.error("[%s] twilio_stream error: %s", call_id, type(e).__name__)
     finally:
         stop_event.set()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         converter.reset()
         try:
             logger.info(
@@ -1650,7 +1824,7 @@ def post_transcript_to_flask(
     for i in range(3):
         try:
             r = requests.post(url, json=payload, headers={"X-Internal-Token": INTERNAL_APP_TOKEN}, timeout=20)
-            logger.info("[transcript] attempt %d -> status=%s body=%s", i+1, r.status_code, r.text[:200])
+            logger.info("[transcript] attempt %d -> status=%s", i+1, r.status_code)
             if 200 <= r.status_code < 300:
                 logger.info("[transcript] Successfully sent transcript to Flask")
                 return

@@ -1,4 +1,5 @@
 import importlib.util
+import asyncio
 import os
 import sys
 import types as python_types
@@ -6,6 +7,7 @@ import uuid
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 
 os.environ["VOICE_ADMIN_API_KEY"] = "admin-test-key"
@@ -50,8 +52,66 @@ def isolated_quest_state(monkeypatch):
     service.QUEST_LAUNCHES.clear()
     service.QUEST_DEVICES.clear()
     service.QUEST_DEVICES[service.QUEST_DEVICE_ID] = service.QuestDeviceState(device_id=service.QUEST_DEVICE_ID)
+    service.QUEST_OPENAI_RELAY_ACTIVE = False
     monkeypatch.setattr(service, "_forward_quest_transcript_to_flask", lambda _payload: (True, ""))
     yield
+
+
+class _FakeOpenAIWebSocket:
+    def __init__(self):
+        self.received = []
+        self.responses = asyncio.Queue()
+
+    async def send(self, message):
+        self.received.append(message)
+        await self.responses.put('{"type":"session.started","session":{"id":"test-live"}}')
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.responses.get()
+
+
+class _FakeOpenAIConnection:
+    def __init__(self, upstream):
+        self.upstream = upstream
+
+    async def __aenter__(self):
+        return self.upstream
+
+    async def __aexit__(self, exc_type, exc, traceback):
+        return False
+
+
+def test_quest_openai_relay_requires_auth_and_forwards_without_exposing_server_key(monkeypatch):
+    client = TestClient(service.app)
+    with pytest.raises(WebSocketDisconnect) as rejected:
+        with client.websocket_connect("/api/quest/openai/live"):
+            pass
+    assert rejected.value.code == 1008
+
+    upstream = _FakeOpenAIWebSocket()
+    captured_connect = {}
+
+    def fake_connect(url, **kwargs):
+        captured_connect["url"] = url
+        captured_connect["headers"] = kwargs.get("extra_headers")
+        return _FakeOpenAIConnection(upstream)
+
+    monkeypatch.setattr(service, "OPENAI_API_KEY", "server-only-openai-test-key")
+    monkeypatch.setattr(service.websockets, "connect", fake_connect)
+    with client.websocket_connect(
+        "/api/quest/openai/live",
+        headers={"X-Quest-Token": service.QUEST_DEVICE_TOKEN},
+    ) as websocket:
+        websocket.send_text('{"type":"session.start"}')
+        assert '"session.started"' in websocket.receive_text()
+
+    assert upstream.received == ['{"type":"session.start"}']
+    assert captured_connect["url"] == service.OPENAI_LIVE_WEBSOCKET_URL
+    assert captured_connect["headers"]["Authorization"] == "Bearer server-only-openai-test-key"
+    assert service.QUEST_OPENAI_RELAY_ACTIVE is False
 
 
 def test_quest_launch_is_claimed_once_and_transcript_is_idempotent():
