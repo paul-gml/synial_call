@@ -94,7 +94,8 @@ def test_outbound_call_bridges_openai_audio_and_posts_transcript(voice_settings,
         assert config['model'] == 'gpt-live-1' and config['audio']['format']['rate'] == 24000
         text = config['input'][0]['content'][0]['text']
         assert 'Fait publié.' in text and 'Autre paragraphe.' in text
-        assert 'Secret futur' not in text and 'Consigne historique' not in text
+        assert 'Secret futur' in text.split('[TOURS JOUÉS', 1)[0]
+        assert 'Consigne historique' not in text
         params = {p.attrib['name']: p.attrib['value'] for p in ElementTree.fromstring(twilio[0]['twiml']).iter('Parameter')}
         assert 'stream_token' not in response.json()
         start = {'event': 'start', 'start': {'streamSid': 'MZ-test', 'callSid': 'CA-test', 'customParameters': params}}
@@ -128,6 +129,16 @@ def test_missing_openai_key_does_not_dial(voice_settings, monkeypatch):
         response = client.post('/api/prepare_call', headers={'X-API-Key': 'test-admin'}, json={'to': '+33655550101'})
     assert response.status_code == 500
     assert 'OPENAI_API_KEY' in response.json()['detail']
+
+
+@pytest.mark.parametrize('role', ['journaliste', 'prefet', 'colonel_pompiers'])
+def test_scenario_dossier_is_available_before_the_first_event(role):
+    dossier = 'Situation : accident sur la RD 973.\n\nJalon futur : conférence à 17h30.'
+    history = ('SESSION 18 — HISTORIQUE FACTUEL\n\n[CONTEXTE INITIAL DE LA SIMULATION]\n\n'
+               + dossier + '\n\n[FIN DU CONTEXTE INITIAL]\n\n[TOURS ET ÉVÉNEMENTS]')
+    config = live.phone_session(role, 'player', '', history)
+    assert dossier in config['input'][0]['content'][0]['text']
+    assert 'Avant le premier événement' in config['instructions']
 
 
 def test_provider_rejection_closes_socket_without_dialling(voice_settings, monkeypatch):
