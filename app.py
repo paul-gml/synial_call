@@ -120,6 +120,8 @@ GEMINI_OUT_RATE_HZ_DEFAULT = 24000
 # 20ms µ-law @ 8kHz => 160 bytes
 TWILIO_FRAME_BYTES = 160
 OUT_QUEUE_MAX_FRAMES = int(os.getenv("OUT_QUEUE_MAX_FRAMES", "250"))
+# Allow a small jitter buffer without pushing whole audio bursts into Twilio.
+OPENAI_PHONE_PLAYBACK_LEAD_SECONDS = 0.08
 
 # --- Latence / cleanup ---
 PREPARED_SESSION_TTL_SECONDS = int(os.getenv("PREPARED_SESSION_TTL_SECONDS", "90"))
@@ -914,24 +916,36 @@ async def twilio_sender_loop(
     stop_event: asyncio.Event,
     out_frames_q: asyncio.Queue,
     call_id: str,
+    *,
+    pace_playback: bool = False,
 ) -> None:
     try:
         await ctx.started.wait()
+        buffered_until = 0.0
 
         while not stop_event.is_set():
             frame = await out_frames_q.get()
+            try:
+                if not ctx.stream_sid:
+                    continue
 
-            if not ctx.stream_sid:
+                if pace_playback:
+                    duration = len(frame) / TWILIO_RATE_HZ
+                    wait = buffered_until + duration - time.monotonic() - OPENAI_PHONE_PLAYBACK_LEAD_SECONDS
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    if stop_event.is_set():
+                        break
+                    buffered_until = max(buffered_until, time.monotonic()) + duration
+
+                payload_b64 = base64.b64encode(frame).decode("ascii")
+                await ws_send_json(
+                    websocket,
+                    send_lock,
+                    {"event": "media", "streamSid": ctx.stream_sid, "media": {"payload": payload_b64}},
+                )
+            finally:
                 out_frames_q.task_done()
-                continue
-
-            payload_b64 = base64.b64encode(frame).decode("ascii")
-            await ws_send_json(
-                websocket,
-                send_lock,
-                {"event": "media", "streamSid": ctx.stream_sid, "media": {"payload": payload_b64}},
-            )
-            out_frames_q.task_done()
 
     except WebSocketDisconnect:
         logger.info("[%s][twilio] sender ws disconnected", call_id)
@@ -1700,7 +1714,10 @@ async def twilio_stream(websocket: WebSocket):
                 websocket, send_lock, session, ctx, stop_event, converter, out_frames_q, call_id, prepared
             )
         )
-        t_send = asyncio.create_task(twilio_sender_loop(websocket, send_lock, ctx, stop_event, out_frames_q, call_id))
+        t_send = asyncio.create_task(twilio_sender_loop(
+            websocket, send_lock, ctx, stop_event, out_frames_q, call_id,
+            pace_playback=prepared.provider == "openai",
+        ))
         tasks = {t_in, t_out, t_send}
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
 

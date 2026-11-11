@@ -145,3 +145,37 @@ def test_provider_rejection_closes_socket_without_dialling(voice_settings, monke
     assert response.status_code == 502
     assert 'private upstream details' not in response.text
     assert upstream.closed and not service.PREPARED
+
+
+def test_phone_audio_burst_stays_in_order_with_bounded_playback_lead(voice_settings, monkeypatch):
+    service = voice_settings
+    clock = 100.0
+    sent = []
+
+    async def sleep(seconds):
+        nonlocal clock
+        clock += seconds
+
+    async def exercise():
+        queue = asyncio.Queue()
+        stop = asyncio.Event()
+        ctx = service.StreamContext(stream_sid='MZ-test')
+        ctx.started.set()
+        frames = [bytes([index]) * 160 for index in range(8)]
+        for frame in frames:
+            queue.put_nowait(frame)
+
+        async def send(_ws, _lock, message):
+            sent.append((clock, base64.b64decode(message['media']['payload'])))
+            if len(sent) == len(frames):
+                stop.set()
+
+        monkeypatch.setattr(service, 'time', SimpleNamespace(monotonic=lambda: clock))
+        monkeypatch.setattr(service, 'asyncio', SimpleNamespace(sleep=sleep))
+        monkeypatch.setattr(service, 'ws_send_json', send)
+        await service.twilio_sender_loop(None, asyncio.Lock(), ctx, stop, queue, 'test', pace_playback=True)
+        await queue.join()
+        assert [frame for _, frame in sent] == frames
+
+    asyncio.run(exercise())
+    assert [timestamp - 100 for timestamp, _ in sent] == pytest.approx([0, 0, 0, 0, .02, .04, .06, .08])
