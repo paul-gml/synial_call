@@ -1,17 +1,13 @@
 import importlib.util
 import asyncio
-import os
 import sys
 import types as python_types
 import uuid
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
-
-
-os.environ["VOICE_ADMIN_API_KEY"] = "admin-test-key"
-os.environ["QUEST_DEVICE_TOKEN"] = "quest-test-token-that-is-long-enough"
 
 
 def _install_optional_dependency_stubs():
@@ -49,6 +45,8 @@ import app as service  # noqa: E402
 
 @pytest.fixture(autouse=True)
 def isolated_quest_state(monkeypatch):
+    monkeypatch.setattr(service, "VOICE_ADMIN_API_KEY", "admin-test-key")
+    monkeypatch.setattr(service, "QUEST_DEVICE_TOKEN", "quest-test-token-that-is-long-enough")
     service.QUEST_LAUNCHES.clear()
     service.QUEST_DEVICES.clear()
     service.QUEST_DEVICES[service.QUEST_DEVICE_ID] = service.QuestDeviceState(device_id=service.QUEST_DEVICE_ID)
@@ -81,6 +79,7 @@ class _FakeOpenAIConnection:
         return self.upstream
 
     async def __aexit__(self, exc_type, exc, traceback):
+        self.upstream.closed.set()
         return False
 
 
@@ -92,6 +91,7 @@ def test_quest_openai_relay_requires_auth_and_forwards_without_exposing_server_k
     assert rejected.value.code == 1008
 
     upstream = _FakeOpenAIWebSocket()
+    upstream.closed = Event()
     captured_connect = {}
 
     def fake_connect(url, **kwargs):
@@ -107,6 +107,8 @@ def test_quest_openai_relay_requires_auth_and_forwards_without_exposing_server_k
     ) as websocket:
         websocket.send_text('{"type":"session.start"}')
         assert '"session.started"' in websocket.receive_text()
+        websocket.close()
+        assert upstream.closed.wait(2)
 
     assert upstream.received == ['{"type":"session.start"}']
     assert captured_connect["url"] == service.OPENAI_LIVE_WEBSOCKET_URL
