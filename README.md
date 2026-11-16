@@ -12,7 +12,7 @@ GPT-Live-1 incarne les trois personnages au téléphone. Twilio compose le numé
 | `OPENAI_PHONE_VOICE_JOURNALISTE` | `brise`. |
 | `OPENAI_PHONE_VOICE_PREFET` | `sillage`. |
 | `OPENAI_PHONE_VOICE_COLONEL_POMPIERS` | `sillage`. |
-| `OPENAI_PHONE_CODEC` | `pcm` pour le PCM 24 kHz côté OpenAI. `pcmu` transmet les octets G.711 μ-law 8 kHz dans les deux sens. Revenir à `pcm` s’applique aux appels suivants après redémarrage. |
+| `OPENAI_PHONE_CODEC` | `pcmu` par défaut. Transmet les octets G.711 μ-law 8 kHz dans les deux sens. Pour revenir au PCM 24 kHz côté OpenAI, définir `pcm` et redémarrer le service. |
 | `OPENAI_PHONE_PLAYBACK_LEAD_MS` | `60`, borné entre 20 et 200 ms. C’est l’avance de lecture visée côté Twilio. |
 | `OUT_QUEUE_MAX_FRAMES` | `25`, environ 500 ms à 20 ms par trame. La file applique une contre-pression. Une saturation durable ou un envoi bloqué termine proprement l’appel et active le traitement de secours si des paroles ont été capturées. |
 | `ENABLE_TRANSCRIPTIONS` | `true`. Avec `false`, le service désactive la collecte, la transcription et le résumé des nouveaux appels. |
@@ -38,7 +38,7 @@ Les travaux persistent dans `calls.sqlite3` jusqu’à confirmation de Flask pou
 ## Déploiement et essai comparatif
 
 1. Déployer l’application Flask principale en premier. Elle crée la table des reçus via son initialisation habituelle et confirme le stockage du résumé et de la transcription.
-2. Déployer le service vocal avec `pcm`. Sur une instance de test autorisée, déclencher un appel depuis chaque interface et vérifier le personnage, le contexte et la présence du résumé et des tours dans le journal.
-3. Répéter le même dialogue en `pcmu`. Comparer la première réplique, les fins de phrases, les silences, les acquiescements courts, une correction explicite, le timbre et le délai de lecture. Tester `marin` indépendamment du changement de codec.
+2. Déployer le service vocal avec `pcmu`. Sur une instance de test autorisée, déclencher un appel depuis chaque interface et vérifier le personnage, le contexte et la présence du résumé et des tours dans le journal.
+3. Pour comparer les codecs, répéter le même dialogue en `pcm`. Comparer la première réplique, les fins de phrases, les silences, les acquiescements courts, une correction explicite, le timbre et le délai de lecture. Tester `marin` indépendamment du changement de codec.
 
 Les tests locaux simulent OpenAI, Gemini et Twilio. Ils vérifient la chaîne logicielle. La qualité sonore, l’expressivité en français, le comportement réel des interruptions et les droits de projet se vérifient sur un appel autorisé.

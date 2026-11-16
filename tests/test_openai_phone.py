@@ -205,7 +205,7 @@ def test_voice_override_supports_named_and_custom_voice(monkeypatch):
 @pytest.mark.parametrize(('role', 'player_cue', 'admin_cue'), [
     ('journaliste', 'Je prépare mon direct, faites vite', 'C\'est toi qui cherches le scoop'),
     ('prefet', 'Je suis en réunion', 'Tu prends l\'initiative pour obtenir un bilan'),
-    ('colonel_pompiers', 'Je suis avec mes équipes', 'Tu appelles parce qu\'un renseignement'),
+    ('colonel_pompiers', 'Colonel Vasseur, je vous écoute.', 'Tu appelles parce qu\'un renseignement'),
 ])
 def test_call_origin_selects_one_role_opening_without_losing_scenario(role, player_cue, admin_cue):
     dossier = 'Situation : accident sur la RD 973.\n\nJalon futur : conférence à 17h30.'

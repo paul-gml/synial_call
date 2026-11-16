@@ -88,7 +88,7 @@ POSTCALL_LOCATION = os.getenv("VOICE_POSTCALL_GOOGLE_LOCATION", "").strip() or (
 )
 
 ENABLE_TRANSCRIPTIONS = os.getenv("ENABLE_TRANSCRIPTIONS", "true").lower() in ("1", "true", "yes", "y")
-OPENAI_PHONE_CODEC = os.getenv("OPENAI_PHONE_CODEC", "pcm").strip().lower()
+OPENAI_PHONE_CODEC = os.getenv("OPENAI_PHONE_CODEC", openai_live_phone.DEFAULT_CODEC).strip().lower()
 TWILIO_RATE_HZ = 8000
 TWILIO_FRAME_BYTES = 160  # 20 ms
 OUT_QUEUE_MAX_FRAMES = max(5, int(os.getenv("OUT_QUEUE_MAX_FRAMES", "25")))

@@ -15,6 +15,7 @@ from phone_dialogue import GREETING, ROLES, build_phone_dialogue
 MODEL = os.getenv("OPENAI_PHONE_MODEL", "").strip() or "gpt-live-1"
 RATE = 24000
 URL = "wss://api.openai.com/v1/live/sessions"
+DEFAULT_CODEC = "pcmu"
 
 
 AUDIO_FORMATS = {
@@ -23,7 +24,7 @@ AUDIO_FORMATS = {
 }
 
 
-def phone_session(ai_role, initiated_by, player_role, history, codec="pcm"):
+def phone_session(ai_role, initiated_by, player_role, history, codec=DEFAULT_CODEC):
     instructions, context = build_phone_dialogue(ai_role, initiated_by, player_role, history)
     voice = os.getenv(f"OPENAI_PHONE_VOICE_{ai_role.upper()}", "").strip() or ROLES[ai_role].voice
     if voice.startswith("voice_"):
