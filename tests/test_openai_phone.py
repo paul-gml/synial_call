@@ -89,7 +89,9 @@ def test_signed_inbound_registers_dialled_role_before_connecting_without_added_r
         if action == "call_started":
             return {"ok": True}
         return {"run_id": "run", "player_id": "player", "number_session": 2, "player_name": "Sophie",
-                "to": payload["from"], "briefing": {"message": "Engagement SMS à 15 heures."}}
+                "to": payload["from"], "briefing": {"points_importants_de_ce_fil": [
+                    {"auteur": "Sophie", "destinataire": "Le préfet", "extrait_original": "Engagement SMS à 15 heures."},
+                ]}}
 
     monkeypatch.setattr(service, "frontend_request", resolve)
     data = {"AccountSid": "test", "To": number, "From": "+33655550101", "CallSid": sid}
@@ -142,6 +144,49 @@ def test_sms_uses_own_number_and_checks_single_use_dispatch_before_provider(voic
         assert client.post("/api/send_sms", json=data, headers=headers).status_code == 200
         assert client.post("/api/send_sms", json=data, headers=headers).status_code == 409
     assert len(posted) == 1 and posted[0]["from_"] == number
+
+
+def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_short_briefing():
+    long_text = "Détail ancien de l'exercice. " * 100
+    previous_sms = {"auteur": "Marc", "destinataire": "Sarah Lenoir", "propos": "Le portail nord était fermé."}
+    data = {
+        "contexte_initial_connu": "Une alerte est reçue. " + long_text,
+        "informations_communicables_de_ce_personnage": long_text,
+        "interlocuteur": {"nom": "Sophie", "fonction": "Direction"},
+        "motif": "Confirmer l'accès au site",
+        "journal_de_la_cellule": {
+            "événements_et_conséquences_publiés": [{"extrait": long_text}] * 10
+            + [{"extrait": "Le portail a été ouvert à 14 h 15."}],
+            "décisions_soumises_par_la_cellule": [long_text] * 10 + ["La cellule décide d'envoyer les gendarmes."],
+        },
+        "échanges_avec_les_autres_joueurs": [{"extraits": [previous_sms], "scenario_time": "14 h"}] * 20,
+        "notes_animation": "Informations futures confidentielles.",
+    }
+    config = live.phone_session("journaliste", "admin", "Direction", "Dossier hors partie", briefing=data)
+    context = config["input"][0]["content"][0]["text"]
+    assert "Sarah Lenoir" in config["instructions"]
+    assert "prends la parole" in config["instructions"]
+    assert "d'envoyer les gendarmes" in context and "exécution à confirmer" in context
+    assert "Le portail a été ouvert à 14 h 15." in context
+    assert "14 h · Marc → Sarah Lenoir : Le portail nord était fermé." in context
+    assert not any(value in context for value in ("Dossier hors partie", "Informations futures confidentielles"))
+    assert len(context) < 3800
+
+
+def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_audio():
+    recording = phone_postcall.CallRecording(16)
+    voice = b"\xb1" * 160
+    def speech(role, start_ms, duration_ms):
+        for t in range(start_ms, start_ms + duration_ms, 20):
+            recording.add(role, t * 8, voice)
+    speech("assistant", 100, 400)
+    speech("user", 1000, 1000)
+    speech("assistant", 7000, 600)
+    speech("user", 8000, 400)
+    speech("assistant", 8900, 300)
+    speech("user", 10000, 400)
+    speech("assistant", 10600, 300)
+    assert recording.audible_reply_gaps_ms(9200 * 8) == [5000, 500]
 
 
 @pytest.mark.parametrize("codec", ["pcm", "pcmu"])

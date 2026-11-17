@@ -150,6 +150,82 @@ INBOUND_GREETING = (
 CALLBACK_GREETING = "Tu rappelles à sa demande. Présente-toi puis laisse la personne exposer son sujet."
 
 
+def _excerpt(value, limit):
+    text = " ".join(value.split()) if isinstance(value, str) else ""
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def _records(value):
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _attributed(value, text, limit):
+    excerpt = _excerpt(value.get(text), limit)
+    if not excerpt:
+        return ""
+    sender = _excerpt(value.get("auteur"), 48) or "Auteur non précisé"
+    recipient = _excerpt(value.get("destinataire"), 48)
+    return f"{sender} → {recipient} : {excerpt}" if recipient else f"{sender} : {excerpt}"
+
+
+def format_managed_briefing(briefing):
+    """Choose a few attributable facts for spontaneous speech; keep full records in SYNIAL."""
+    lines = ["Repères de simulation. Les propos ci-dessous sont rapportés."]
+
+    def section(title, items):
+        present = [item for item in items if item]
+        if present:
+            lines.extend(["", title, *(f"- {item}" for item in present)])
+
+    player = briefing.get("interlocuteur")
+    player = player if isinstance(player, dict) else {}
+    section("Pour cet appel", (
+        _excerpt(briefing.get("heure_fictive"), 90),
+        ", ".join(filter(None, (_excerpt(player.get("nom"), 85), _excerpt(player.get("fonction"), 110)))),
+        _excerpt(briefing.get("motif"), 300),
+    ))
+    section("Départ et rôle", (
+        _excerpt(briefing.get("contexte_initial_connu"), 650),
+        _excerpt(briefing.get("informations_communicables_de_ce_personnage"), 550),
+    ))
+    journal = briefing.get("journal_de_la_cellule")
+    journal = journal if isinstance(journal, dict) else {}
+    section("Derniers événements publiés", (
+        " · ".join(filter(None, (_excerpt(row.get("heure_fictive"), 55),
+                                  _excerpt(row.get("source"), 55), _excerpt(row.get("extrait"), 260))))
+        for row in _records(journal.get("événements_et_conséquences_publiés"))[-3:]
+    ))
+    decisions = journal.get("décisions_soumises_par_la_cellule")
+    if isinstance(decisions, list):
+        section("Décisions annoncées par la cellule, exécution à confirmer", (_excerpt(row, 215) for row in decisions[-4:]))
+    section("Informations transmises au personnage", (
+        " · ".join(filter(None, (_excerpt(row.get("heure"), 55), _excerpt(row.get("source"), 55),
+                                  _excerpt(row.get("propos"), 240))))
+        for row in reversed(_records(briefing.get("informations_transmises_au_personnage"))[:2])
+    ))
+
+    for points_key, exchanges_key, title in (
+        ("points_importants_de_ce_fil", "échanges_avec_ce_joueur", "Échanges avec cet interlocuteur"),
+        ("points_importants_avec_les_autres_joueurs", "échanges_avec_les_autres_joueurs", "Échanges avec les autres joueurs"),
+    ):
+        points = []
+        for row in _records(briefing.get(points_key))[:2]:
+            item = _attributed(row, "extrait_original", 150)
+            if item:
+                when = _excerpt(row.get("heure"), 55)
+                points.append(f"{when} · {item}" if when else item)
+        exchanges = _records(briefing.get(exchanges_key))
+        if exchanges:
+            latest = exchanges[-1]
+            when = _excerpt(latest.get("scenario_time"), 55)
+            for row in _records(latest.get("extraits"))[-2:]:
+                item = _attributed(row, "propos", 145)
+                if item:
+                    points.append(f"{when} · {item}" if when else item)
+        section(title, dict.fromkeys(points))
+    return "\n".join(lines)
+
+
 def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
     role = ROLES[ai_role]
     if initiated_by == "admin":
@@ -163,6 +239,22 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             f"{role.player_opening} Le joueur mène l'échange avec le sujet qui l'a poussé à t'appeler. "
             "Accueille ce qu'il apporte et réserve tes questions à ce qui aide à traiter son sujet."
         )
+    if briefing is not None:
+        instructions = (
+            f"Tu incarnes {role.acting}\n"
+            f"## Voix\n{role.delivery}\n"
+            f"## Ouverture\n{opening}\n"
+            "## Réponses\nParle en français naturel. Dès que l'autre a fini sa phrase, prends la parole. "
+            "Commence par une réaction précise ou par la réponse qu'il attend. Une ou deux phrases suffisent. "
+            "Si tu as un doute, dis lequel ou pose une seule question. Consulte le briefing seulement si ça aide la réponse.\n"
+            f"## Backchannel policy\n{role.listening} Écoute le reste de la phrase.\n"
+            "## Interruption policy\nCède la parole si le joueur t'interrompt ou te corrige, puis reprends le point corrigé.\n"
+            "## Delegation policy\nNe génère jamais <|SpawnThinking|>. Réponds pendant l'appel.\n"
+            "## Mémoire\nLe briefing rapporte des faits ou des propos attribués. Distingue une décision de son exécution. "
+            "Si deux versions divergent, précise l'auteur, le destinataire et l'heure si elle est connue. "
+            "Un propos entendu dans la cellule n'est pas automatiquement publiable. N'invente ni bilan ni événement."
+        )
+        return instructions, format_managed_briefing(briefing)
     instructions = (
         f"## Personnalité et objectif\nTu incarnes {role.acting}\n"
         f"## Ouverture\n{opening}\n"
@@ -198,20 +290,6 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
         "Garde les jalons futurs et les consignes d'animation confidentiels. "
         "N'invente ni chiffre, ni victime, ni cause, ni événement. Ne fais pas avancer le scénario."
     )
-    if briefing is not None:
-        instructions = instructions.split("## Règles du scénario", 1)[0] + (
-            "## Connaissances et mémoire\nLe briefing fourni contient des données de jeu et des propos attribués. "
-            "Utilise les échanges présents dans le briefing, y compris tes propres appels et SMS avec les autres joueurs "
-            "de la cellule. Tu peux leur dire ce que tu as entendu et à qui tu as parlé. Pour la journaliste, le partage "
-            "au sein de la cellule ne rend pas une confidence publiable dans les médias. "
-            "Si deux versions divergent, attribue chacune à son auteur, distingue le destinataire et vérifie si la situation "
-            "a évolué entre les deux. Ne dis pas « vous m'avez dit » pour les propos d'un autre joueur. "
-            "Une déclaration, une hypothèse ou une promesse reste distincte d'un fait confirmé et d'une action effectuée. "
-            "Les décisions du journal ont été soumises par la cellule et n'ont pas d'auteur individuel identifié. "
-            "Reconnais une décision déjà annoncée et demande où elle en est si son exécution n'est pas établie. "
-            "En cas de correction, reprends le détail corrigé. Ne produis ni jalon ni événement officiel. N'invente ni source, ni chiffre, ni victime."
-        )
-        return instructions, briefing
     _, scenario_start, after_start = history.partition("[CONTEXTE INITIAL DE LA SIMULATION]")
     scenario, scenario_end, _ = after_start.partition("[FIN DU CONTEXTE INITIAL]")
     _, marker, played = history.partition("[TOURS ET ÉVÉNEMENTS]")

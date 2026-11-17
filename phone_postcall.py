@@ -74,6 +74,43 @@ class CallRecording:
                    for start, frame in frames)
         }
 
+    def audible_reply_gaps_ms(self, played_end):
+        """Estimate the gaps from audible bursts, independently of transcript timestamps."""
+        def bursts(role, limit):
+            active = []
+            start = end = amplitude_samples = 0
+            for position, frame in self.channels[role]:
+                if position >= limit:
+                    break
+                frame = frame[:limit - position]
+                if audioop.rms(audioop.ulaw2lin(frame, 2), 2) <= 180:
+                    continue
+                if not amplitude_samples or position - end > RATE // 5:
+                    if amplitude_samples >= RATE // 10:
+                        active.append((start, end))
+                    start = position
+                    amplitude_samples = 0
+                end = max(position + len(frame), end)
+                amplitude_samples += len(frame)
+            if amplitude_samples >= RATE // 10:
+                active.append((start, end))
+            return active
+
+        user = bursts("user", self.limit)
+        assistant = bursts("assistant", min(self.limit, played_end))
+        gaps = []
+        index = 0
+        last_user_end = previous_reply_end = -1
+        for start, end in assistant:
+            while index < len(user) and user[index][1] <= start:
+                last_user_end = user[index][1]
+                index += 1
+            user_overlaps = index < len(user) and user[index][0] < start
+            if last_user_end > previous_reply_end and not user_overlaps:
+                gaps.append((start - last_user_end) * 1000 // RATE)
+            previous_reply_end = end
+        return gaps
+
     def wav(self, end_sample):
         end_sample = min(end_sample, self.limit)
         channels = []

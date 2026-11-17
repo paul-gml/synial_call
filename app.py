@@ -1037,7 +1037,7 @@ async def prepare_live_call(body, ai_role, initiated_by):
         raise RuntimeError("Managed calls require voice and transcription configuration")
     call_id = uuid.uuid4().hex
     created = time.time()
-    briefing = json.dumps(body["briefing"], ensure_ascii=False) if isinstance(body.get("briefing"), dict) else None
+    briefing = body["briefing"] if isinstance(body.get("briefing"), dict) else None
     config = openai_live_phone.phone_session(
         ai_role, "callback" if briefing and initiated_by == "player" else initiated_by,
         str(body.get("player_role") or ""), str(body.get("history_text") or ""), OPENAI_PHONE_CODEC,
@@ -1464,9 +1464,11 @@ async def finish_phone_call(postcall, prepared, ctx, recording, deltas, queue, i
     if ctx is not None:
         turns = openai_live_phone.transcript_turns(deltas)
         reply_gaps = openai_live_phone.reply_gaps_ms(turns)
+        audible_gaps = await asyncio.to_thread(recording.audible_reply_gaps_ms, ctx.played_end) if recording else []
         logger.info(
-            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
-            call_id, prepared.ai_role, prepared.codec, ctx.first_model_audio_ms, ctx.first_output_ms, reply_gaps[-10:], ctx.delegations,
+            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s audible_reply_gaps_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
+            call_id, prepared.ai_role, prepared.codec, ctx.first_model_audio_ms, ctx.first_output_ms, reply_gaps[-10:],
+            audible_gaps[-10:], ctx.delegations,
             ctx.max_queue_frames, ctx.max_mark_delay_ms, finalized,
         )
     if recording is not None and ctx is not None:
