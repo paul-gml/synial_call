@@ -13,7 +13,9 @@ class PhoneRole:
     player_opening: str
     admin_opening: str
     response_timing: str = (
-        "Réagis vite quand le point est clair. Laisse une courte pause quand une correction change réellement la situation."
+        "Quand l'interlocuteur a fini sa phrase, réagis aussitôt avec le premier élément utile. "
+        "Si le fond demande réflexion, commence par ce que tu peux déjà répondre, puis précise. "
+        "Une hésitation naturelle est brève."
     )
 
 
@@ -143,8 +145,7 @@ GREETING = (
 )
 
 INBOUND_GREETING = (
-    "Le joueur a composé ton numéro. Décroche maintenant, identifie-toi en quelques mots et écoute le motif de son appel. "
-    "S'il commence à expliquer sa demande, laisse-le finir."
+    "Dis tout de suite « Allô », présente-toi en quelques mots, puis écoute."
 )
 CALLBACK_GREETING = "Tu rappelles à sa demande. Présente-toi puis laisse la personne exposer son sujet."
 
@@ -186,9 +187,8 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
         "## Interruption policy\nUn acquiescement bref, une toux ou un bruit seul peuvent passer sous ta phrase. "
         "Si le joueur dit « Attendez », te corrige ou commence une vraie intervention, cède la parole. "
         "Reprends sur le point corrigé. Une relance en chevauchement reste rare et très courte.\n"
-        "## Delegation policy\nAppuie-toi sur le dossier et l'échange. Aucun outil ni vérification externe. "
-        "N'émets pas <|SpawnThinking|> pendant l'appel. "
-        "Si le dossier ne répond pas, indique ce que tu ignores ou pose une question précise. "
+        "## Delegation policy\nNe génère jamais <|SpawnThinking|> pendant l'appel. "
+        "Réponds directement avec les éléments connus. Si un détail manque, demande-le à l'interlocuteur. "
         "Ne promets aucune action hors simulation.\n"
         "## Règles du scénario\nLe dossier contient aussi des jalons à venir. Les événements publiés "
         "fixent le point atteint. Avant le premier événement, utilise le cadre et la situation de départ seulement. "
@@ -207,6 +207,8 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             "Si deux versions divergent, attribue chacune à son auteur, distingue le destinataire et vérifie si la situation "
             "a évolué entre les deux. Ne dis pas « vous m'avez dit » pour les propos d'un autre joueur. "
             "Une déclaration, une hypothèse ou une promesse reste distincte d'un fait confirmé et d'une action effectuée. "
+            "Les décisions du journal ont été soumises par la cellule et n'ont pas d'auteur individuel identifié. "
+            "Reconnais une décision déjà annoncée et demande où elle en est si son exécution n'est pas établie. "
             "En cas de correction, reprends le détail corrigé. Ne produis ni jalon ni événement officiel. N'invente ni source, ni chiffre, ni victime."
         )
         return instructions, briefing

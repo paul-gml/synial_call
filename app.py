@@ -42,6 +42,7 @@ from twilio.base.exceptions import TwilioRestException
 from twilio.http.http_client import TwilioHttpClient
 import requests
 import websockets
+from websockets.exceptions import ConnectionClosed
 import openai_live_phone
 from phone_postcall import CallRecording, PostCallQueue, deliver, gemini_client
 
@@ -59,8 +60,8 @@ TWILIO_ACTOR_NUMBERS = {
     role: os.getenv(f"TWILIO_NUMBER_{role.upper()}", "").strip()
     for role in openai_live_phone.ROLES
 }
-INBOUND_RING_MIN = max(1, min(10, int(os.getenv("TWILIO_INBOUND_RING_MIN", "5"))))
-INBOUND_RING_MAX = max(INBOUND_RING_MIN, min(12, int(os.getenv("TWILIO_INBOUND_RING_MAX", "10"))))
+INBOUND_RING_MIN = max(0, min(10, int(os.getenv("TWILIO_INBOUND_RING_MIN", "0"))))
+INBOUND_RING_MAX = max(INBOUND_RING_MIN, min(12, int(os.getenv("TWILIO_INBOUND_RING_MAX", "0"))))
 
 # Sécurité : API key pour déclencher l'appel depuis ton admin
 VOICE_ADMIN_API_KEY = os.getenv("VOICE_ADMIN_API_KEY", "").strip()
@@ -262,6 +263,8 @@ class PreparedCall:
     player_id: str = ""
     scenario_time: str = ""
     managed_greeting: bool = False
+    inbound_registered: bool = False
+    opening_event_id: Optional[str] = None
     participant_phone: str = field(default="", repr=False)
 
 
@@ -405,6 +408,7 @@ async def _close_prepared_call(call_id: str, reason: str) -> None:
         return
 
     async with pc.lock:
+        never_connected = pc.state in {"ready", "calling"}
         pc.state = "ended"
 
     if pc.cleanup_task and pc.cleanup_task is not asyncio.current_task():
@@ -417,6 +421,15 @@ async def _close_prepared_call(call_id: str, reason: str) -> None:
         await pc.upstream_cm.__aexit__(None, None, None)
     except Exception as e:
         logger.warning("[%s] failed to close voice session (%s): %s", call_id, reason, type(e).__name__)
+    if pc.inbound_registered and never_connected and reason == "ttl":
+        try:
+            await asyncio.to_thread(deliver, MAIN_APP_BASE_URL, INTERNAL_APP_TOKEN, {
+                "run_id": pc.run_id, "player_id": pc.player_id, "number_session": pc.number_session,
+                "ai_role": pc.ai_role, "call_sid": pc.twilio_call_sid,
+                "turns": [], "partial": True,
+            })
+        except Exception as exc:
+            logger.warning("[%s] unconnected call could not be closed type=%s", call_id, type(exc).__name__)
 
 
 async def _cleanup_expired_call(call_id: str) -> None:
@@ -449,12 +462,14 @@ class StreamContext:
     sent_end: int = 0
     marks: dict = field(default_factory=dict)
     first_output_ms: Optional[int] = None
+    first_model_audio_ms: Optional[int] = None
     max_mark_delay_ms: int = 0
     max_queue_frames: int = 0
     playback_uncertain: bool = False
     last_media_at: Optional[float] = None
     ended_at: float = 0.0
     optional_events: set = field(default_factory=set)
+    delegations: int = 0
 
     def position(self):
         return max(0, round((time.monotonic() - self.started_at) * TWILIO_RATE_HZ))
@@ -479,6 +494,8 @@ async def openai_phone_receiver_loop(session, converter, queue, deltas, stopping
                 deltas.append((role, event))
         elif kind == "session.output_audio.delta" and not stopping.is_set():
             for frame in converter.to_twilio(base64.b64decode(event["delta"], validate=True)):
+                if ctx.first_model_audio_ms is None:
+                    ctx.first_model_audio_ms = ctx.position() * 1000 // TWILIO_RATE_HZ
                 if stopping.is_set():
                     ctx.playback_uncertain = True
                     break
@@ -487,13 +504,14 @@ async def openai_phone_receiver_loop(session, converter, queue, deltas, stopping
         elif kind == "session.delegation.created" and not stopping.is_set():
             delegation = event.get("delegation") or {}
             if delegation.get("target") == "client" and delegation.get("id"):
+                ctx.delegations += 1
                 event_id = uuid.uuid4().hex
                 ctx.optional_events.add(event_id)
                 await asyncio.wait_for(openai_live_phone.send(
                     session, "session.thinking.append", event_id=event_id,
                     delegation_id=delegation["id"],
-                    content="Le dossier de simulation est déjà disponible. Aucune source ni vérification externe. "
-                            "Utilise les éléments fournis ou indique l'incertitude, en restant dans le rôle.",
+                    content="Le dossier est déjà en mémoire. Réponds maintenant avec le premier fait utile "
+                            "ou la question précise qui permettra d’avancer.",
                 ), timeout=3)
     return False
 
@@ -534,9 +552,15 @@ async def twilio_sender_loop(websocket, ctx, queue, recording):
             queue.task_done()
 
 
-async def twilio_receiver_loop(websocket, ctx, session, converter, recording, initiated_by):
-    greeting = openai_live_phone.greeting_for(initiated_by)
-    greeting_pending = bool(greeting)
+async def send_opening(session, greeting, event_id, *, timeout=3):
+    await asyncio.wait_for(openai_live_phone.send(
+        session, "session.commentary.append", event_id=event_id,
+        delegation_id=None, content=greeting,
+    ), timeout=timeout)
+
+
+async def twilio_receiver_loop(websocket, ctx, session, converter, recording, initiated_by, *, opening_primed=False):
+    greeting_pending = None if opening_primed else openai_live_phone.greeting_for(initiated_by)
     while True:
         event = await websocket.receive_json()
         kind = event.get("event")
@@ -564,13 +588,10 @@ async def twilio_receiver_loop(websocket, ctx, session, converter, recording, in
             recording.add("user", start, ulaw)
         await asyncio.wait_for(openai_live_phone.send_audio(session, converter.from_twilio(ulaw)), timeout=3)
         if greeting_pending:
-            greeting_pending = False
             event_id = uuid.uuid4().hex
             ctx.optional_events.add(event_id)
-            await asyncio.wait_for(openai_live_phone.send(
-                session, "session.commentary.append", event_id=event_id,
-                delegation_id=None, content=greeting,
-            ), timeout=3)
+            await send_opening(session, greeting_pending, event_id)
+            greeting_pending = None
 
 
 def _twilio_hangup_call(call_sid: str) -> None:
@@ -616,6 +637,8 @@ async def health():
         "model": openai_live_phone.MODEL,
         "phone_provider": VOICE_CALL_PROVIDER,
         "phone_codec": OPENAI_PHONE_CODEC,
+        "revision": os.getenv("RENDER_GIT_COMMIT", "")[:12],
+        "inbound_ring_seconds": {"min": INBOUND_RING_MIN, "max": INBOUND_RING_MAX},
             "phone_provider_configured": bool(OPENAI_API_KEY and VOICE_CALL_PROVIDER == "openai" and OPENAI_PHONE_CODEC in openai_live_phone.AUDIO_FORMATS),
         "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER),
         "public_base_url": PUBLIC_BASE_URL,
@@ -1050,6 +1073,15 @@ def prepared_twiml(pc, *, ring=0):
     )
 
 
+async def register_call(prepared, call_sid):
+    return await asyncio.to_thread(frontend_request, "call_started", {
+        "run_id": prepared.run_id, "player_id": prepared.player_id,
+        "actor": prepared.ai_role, "provider_id": call_sid,
+        "direction": "in" if prepared.initiated_by == "inbound" else "out",
+        "scenario_time": prepared.scenario_time, "phone": prepared.participant_phone,
+    })
+
+
 @app.get("/api/lines")
 async def api_lines(request: Request):
     _require_admin_api_key(request)
@@ -1225,19 +1257,44 @@ async def twilio_voice(request: Request):
         return rejected
     async with PREPARED_LOCK:
         prior = next((pc for pc in PREPARED.values() if pc.twilio_call_sid == sid), None)
-    if prior:
+    if prior and prior.inbound_registered:
         return Response(prepared_twiml(prior), media_type="application/xml")
     body = await asyncio.to_thread(frontend_request, "resolve", {
         "from": form.get("From"), "to": form.get("To"), "actor": actor, "channel": "voice", "provider_id": sid,
     })
     if not body:
         return rejected
+    resolved = time.monotonic()
     try:
         pc = await asyncio.wait_for(prepare_live_call({**body, "call_sid": sid}, actor, "inbound"), timeout=5)
     except Exception as exc:
         logger.warning("Inbound voice preparation failed: %s", type(exc).__name__)
         return rejected
-    ring = max(0, round(random.randint(INBOUND_RING_MIN, INBOUND_RING_MAX) - (time.monotonic() - started)))
+    live_ready = time.monotonic()
+    try:
+        async with pc.lock:
+            if not pc.inbound_registered:
+                pc.inbound_registered = bool(await register_call(pc, sid))
+            if pc.inbound_registered and pc.opening_event_id is None:
+                # Start the greeting as Twilio sets up the stream, using one silent input frame.
+                event_id = uuid.uuid4().hex
+                try:
+                    silence = b"\xff" * TWILIO_FRAME_BYTES if pc.codec == "pcmu" else bytes(openai_live_phone.RATE // 50 * 2)
+                    await asyncio.wait_for(openai_live_phone.send_audio(pc.upstream, silence), timeout=.4)
+                    await send_opening(pc.upstream, openai_live_phone.greeting_for("inbound"), event_id, timeout=.4)
+                    pc.opening_event_id = event_id
+                except (OSError, asyncio.TimeoutError, ConnectionClosed):
+                    logger.info("[%s] inbound greeting deferred to stream", pc.call_id)
+    except HTTPException as exc:
+        logger.warning("[%s] inbound registration failed status=%s", pc.call_id, exc.status_code)
+    if not pc.inbound_registered:
+        await _close_prepared_call(pc.call_id, reason="inbound_registration_failed")
+        return rejected
+    registered = time.monotonic()
+    ring = max(0, round(random.randint(INBOUND_RING_MIN, INBOUND_RING_MAX) - (registered - started)))
+    logger.info("[%s] inbound ready role=%s resolve_ms=%d live_ms=%d registration_ms=%d extra_ring_s=%d",
+                pc.call_id, actor, round((resolved - started) * 1000), round((live_ready - resolved) * 1000),
+                round((registered - live_ready) * 1000), ring)
     return Response(prepared_twiml(pc, ring=ring), media_type="application/xml")
 
 
@@ -1338,17 +1395,14 @@ async def twilio_stream(websocket: WebSocket):
         call_id = prepared.call_id
         if prepared.cleanup_task:
             prepared.cleanup_task.cancel()
-        if prepared.run_id:
-            allowed = await asyncio.to_thread(frontend_request, "call_started", {
-                "run_id": prepared.run_id, "player_id": prepared.player_id,
-                "actor": prepared.ai_role, "provider_id": call_sid,
-                "direction": "in" if prepared.initiated_by == "inbound" else "out",
-                "scenario_time": prepared.scenario_time, "phone": prepared.participant_phone,
-            })
+        ctx = StreamContext(stream_sid, call_sid)
+        if prepared.opening_event_id:
+            ctx.optional_events.add(prepared.opening_event_id)
+        if prepared.run_id and not prepared.inbound_registered:
+            allowed = await register_call(prepared, call_sid)
             if not allowed:
                 await websocket.close(code=1008)
                 return
-        ctx = StreamContext(stream_sid, call_sid)
         if ENABLE_TRANSCRIPTIONS and prepared.number_session:
             recording = CallRecording(VOICE_RECORD_MAX_SECONDS)
         converter = AudioConverter(prepared.codec)
@@ -1357,6 +1411,7 @@ async def twilio_stream(websocket: WebSocket):
             asyncio.create_task(twilio_receiver_loop(
                 websocket, ctx, session, converter, recording,
                 "callback" if prepared.managed_greeting and prepared.initiated_by == "player" else prepared.initiated_by,
+                opening_primed=bool(prepared.opening_event_id),
             )),
             asyncio.create_task(twilio_sender_loop(websocket, ctx, queue, recording)),
         ]
@@ -1407,9 +1462,12 @@ async def finish_phone_call(postcall, prepared, ctx, recording, deltas, queue, i
             await asyncio.gather(live_receiver, return_exceptions=True)
         await _close_prepared_call(call_id, reason="call_end")
     if ctx is not None:
+        turns = openai_live_phone.transcript_turns(deltas)
+        reply_gaps = openai_live_phone.reply_gaps_ms(turns)
         logger.info(
-            "[%s] phone ended codec=%s first_audio_ms=%s max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
-            call_id, prepared.codec, ctx.first_output_ms, ctx.max_queue_frames, ctx.max_mark_delay_ms, finalized,
+            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
+            call_id, prepared.ai_role, prepared.codec, ctx.first_model_audio_ms, ctx.first_output_ms, reply_gaps[-10:], ctx.delegations,
+            ctx.max_queue_frames, ctx.max_mark_delay_ms, finalized,
         )
     if recording is not None and ctx is not None:
         try:

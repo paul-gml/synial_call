@@ -65,14 +65,15 @@ def voice_settings(monkeypatch, tmp_path):
         'TWILIO_FROM_NUMBER': '+33155550101', 'TWILIO_ACCOUNT_SID': 'test',
         'TWILIO_AUTH_TOKEN': 'test', 'ALLOWED_TO_PREFIXES': [], 'ENABLE_TRANSCRIPTIONS': True,
         'VOICE_POSTCALL_DIR': tmp_path, 'MAIN_APP_BASE_URL': 'https://app.invalid',
-        'INTERNAL_APP_TOKEN': 'test-callback', 'OPENAI_PHONE_CODEC': 'pcm',
+        'INTERNAL_APP_TOKEN': 'test-callback', 'OPENAI_PHONE_CODEC': 'pcm', 'TWILIO_SAY_BEFORE_STREAM': '',
+        'INBOUND_RING_MIN': 0, 'INBOUND_RING_MAX': 0,
     }.items():
         monkeypatch.setattr(service, name, value)
     service.PREPARED.clear()
     return service
 
 
-def test_signed_inbound_uses_dialled_role_and_rings_before_stream(voice_settings, monkeypatch):
+def test_signed_inbound_registers_dialled_role_before_connecting_without_added_ring(voice_settings, monkeypatch):
     from twilio.request_validator import RequestValidator
 
     service = voice_settings
@@ -80,32 +81,47 @@ def test_signed_inbound_uses_dialled_role_and_rings_before_stream(voice_settings
     number = "+33939240123"
     sid = "CA" + "1" * 32
     monkeypatch.setattr(service, "TWILIO_ACTOR_NUMBERS", {"prefet": number})
-    monkeypatch.setattr(service.random, "randint", lambda *_args: 7)
     monkeypatch.setattr(live.websockets, "connect", lambda *_args, **_kwargs: upstream)
     requests = []
 
     def resolve(action, payload):
         requests.append((action, payload))
+        if action == "call_started":
+            return {"ok": True}
         return {"run_id": "run", "player_id": "player", "number_session": 2, "player_name": "Sophie",
                 "to": payload["from"], "briefing": {"message": "Engagement SMS à 15 heures."}}
 
     monkeypatch.setattr(service, "frontend_request", resolve)
     data = {"AccountSid": "test", "To": number, "From": "+33655550101", "CallSid": sid}
     signature = RequestValidator("test").compute_signature("https://voice.invalid/twilio/voice", data)
+    async def capture(*_args):
+        return None
+    monkeypatch.setattr(service, "enqueue_phone_record", capture)
     with TestClient(service.app) as client:
         assert client.post("/twilio/voice", data=data).status_code == 403
         response = client.post("/twilio/voice", data=data, headers={"X-Twilio-Signature": signature})
         root = ElementTree.fromstring(response.text)
-        assert root[0].tag == "Pause"
-        assert int(root[0].get("length")) in {6, 7}
-        assert root[1].tag == "Connect"
+        assert root[0].tag == "Connect"
+        assert root.find("Pause") is None
         assert requests[0][0] == "resolve" and requests[0][1]["actor"] == "prefet"
+        assert requests[1][0] == "call_started" and requests[1][1]["direction"] == "in"
         config = upstream.sent[0]["session"]
         assert "Jean-Marc Delaunay" in config["instructions"]
         assert "Engagement SMS à 15 heures." in config["input"][0]["content"][0]["text"]
-        assert "a composé ton numéro" in config["input"][1]["content"][0]["text"]
-        for call_id in list(service.PREPARED):
-            client.portal.call(service._close_prepared_call, call_id, "test")
+        assert "Allô" in config["input"][1]["content"][0]["text"]
+        assert [event["type"] for event in upstream.sent] == [
+            "session.start", "session.input_audio.append", "session.commentary.append",
+        ]
+        params = {p.get("name"): p.get("value") for p in root.iter("Parameter")}
+        ws_sig = RequestValidator("test").compute_signature("wss://voice.invalid/twilio/stream", {})
+        with client.websocket_connect("/twilio/stream", headers={"X-Twilio-Signature": ws_sig}) as ws:
+            ws.send_json({"event": "start", "start": {"streamSid": "MZ-test", "callSid": sid, "customParameters": params}})
+            assert ws.receive_json()["event"] == "media"
+            assert ws.receive_json()["event"] == "mark"
+            ws.send_json({"event": "stop"})
+    assert [name for name, _ in requests] == ["resolve", "call_started"]
+    openings = [event for event in upstream.sent if event["type"] == "session.commentary.append"]
+    assert len(openings) == 1 and "Allô" in openings[0]["content"]
 
 
 def test_sms_uses_own_number_and_checks_single_use_dispatch_before_provider(voice_settings, monkeypatch):

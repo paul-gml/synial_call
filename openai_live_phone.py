@@ -110,3 +110,14 @@ def transcript_turns(deltas):
             previous["end_ms"] = max(end, previous.get("end_ms", 0))
     turns.sort(key=lambda turn: turn.get("start_ms", float("inf")))
     return [dict(turn, text=turn["text"].strip()) for turn in turns if turn["text"].strip()]
+
+
+def reply_gaps_ms(turns):
+    """Approximate conversational gaps on the Live transcript timeline."""
+    gaps = []
+    for caller, reply in zip(turns, turns[1:]):
+        if caller["role"] == "user" and reply["role"] == "assistant" and "end_ms" in caller and "start_ms" in reply:
+            gap = reply["start_ms"] - caller["end_ms"]
+            if gap >= 0:
+                gaps.append(gap)
+    return gaps
