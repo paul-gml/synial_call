@@ -72,6 +72,62 @@ def voice_settings(monkeypatch, tmp_path):
     return service
 
 
+def test_signed_inbound_uses_dialled_role_and_rings_before_stream(voice_settings, monkeypatch):
+    from twilio.request_validator import RequestValidator
+
+    service = voice_settings
+    upstream = FakeLiveSocket()
+    number = "+33939240123"
+    sid = "CA" + "1" * 32
+    monkeypatch.setattr(service, "TWILIO_ACTOR_NUMBERS", {"prefet": number})
+    monkeypatch.setattr(service.random, "randint", lambda *_args: 7)
+    monkeypatch.setattr(live.websockets, "connect", lambda *_args, **_kwargs: upstream)
+    requests = []
+
+    def resolve(action, payload):
+        requests.append((action, payload))
+        return {"run_id": "run", "player_id": "player", "number_session": 2, "player_name": "Sophie",
+                "to": payload["from"], "briefing": {"message": "Engagement SMS à 15 heures."}}
+
+    monkeypatch.setattr(service, "frontend_request", resolve)
+    data = {"AccountSid": "test", "To": number, "From": "+33655550101", "CallSid": sid}
+    signature = RequestValidator("test").compute_signature("https://voice.invalid/twilio/voice", data)
+    with TestClient(service.app) as client:
+        assert client.post("/twilio/voice", data=data).status_code == 403
+        response = client.post("/twilio/voice", data=data, headers={"X-Twilio-Signature": signature})
+        root = ElementTree.fromstring(response.text)
+        assert root[0].tag == "Pause"
+        assert int(root[0].get("length")) in {6, 7}
+        assert root[1].tag == "Connect"
+        assert requests[0][0] == "resolve" and requests[0][1]["actor"] == "prefet"
+        config = upstream.sent[0]["session"]
+        assert "Jean-Marc Delaunay" in config["instructions"]
+        assert "Engagement SMS à 15 heures." in config["input"][0]["content"][0]["text"]
+        assert "a composé ton numéro" in config["input"][1]["content"][0]["text"]
+        for call_id in list(service.PREPARED):
+            client.portal.call(service._close_prepared_call, call_id, "test")
+
+
+def test_sms_uses_own_number_and_checks_single_use_dispatch_before_provider(voice_settings, monkeypatch):
+    service = voice_settings
+    number = "+33939240123"
+    posted = []
+    monkeypatch.setattr(service, "TWILIO_ACTOR_NUMBERS", {"colonel_pompiers": number})
+    monkeypatch.setattr(service, "frontend_request", lambda action, payload: (
+        {"ok": True} if not posted and action == "authorize_sms" and payload["from"] == number else None
+    ))
+    monkeypatch.setattr(service, "_twilio_client", lambda: SimpleNamespace(messages=SimpleNamespace(
+        create=lambda **kwargs: posted.append(kwargs) or SimpleNamespace(sid="SM" + "3" * 32, status="queued")
+    )))
+    data = {"actor": "colonel_pompiers", "to": "+33655550101", "body": "Confirmez l’accès nord.",
+            "job_id": "4" * 32}
+    with TestClient(service.app) as client:
+        headers = {"X-API-Key": "test-admin"}
+        assert client.post("/api/send_sms", json=data, headers=headers).status_code == 200
+        assert client.post("/api/send_sms", json=data, headers=headers).status_code == 409
+    assert len(posted) == 1 and posted[0]["from_"] == number
+
+
 @pytest.mark.parametrize("codec", ["pcm", "pcmu"])
 def test_outbound_call_bridges_openai_audio_and_posts_transcript(voice_settings, monkeypatch, codec):
     service = voice_settings

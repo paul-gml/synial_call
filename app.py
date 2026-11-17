@@ -26,6 +26,7 @@ import asyncio
 import logging
 import sqlite3
 import hmac
+import random
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -36,6 +37,9 @@ import audioop  # stdlib (déprécié dans le futur, mais OK en 3.10-3.12)
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Response, HTTPException
 
 from twilio.rest import Client as TwilioClient
+from twilio.request_validator import RequestValidator
+from twilio.base.exceptions import TwilioRestException
+from twilio.http.http_client import TwilioHttpClient
 import requests
 import websockets
 import openai_live_phone
@@ -51,6 +55,12 @@ from phone_postcall import CallRecording, PostCallQueue, deliver, gemini_client
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
 TWILIO_FROM_NUMBER = os.getenv("TWILIO_FROM_NUMBER", "").strip()
+TWILIO_ACTOR_NUMBERS = {
+    role: os.getenv(f"TWILIO_NUMBER_{role.upper()}", "").strip()
+    for role in openai_live_phone.ROLES
+}
+INBOUND_RING_MIN = max(1, min(10, int(os.getenv("TWILIO_INBOUND_RING_MIN", "5"))))
+INBOUND_RING_MAX = max(INBOUND_RING_MIN, min(12, int(os.getenv("TWILIO_INBOUND_RING_MAX", "10"))))
 
 # Sécurité : API key pour déclencher l'appel depuis ton admin
 VOICE_ADMIN_API_KEY = os.getenv("VOICE_ADMIN_API_KEY", "").strip()
@@ -145,8 +155,10 @@ def _to_wss_url(public_base_url: str, path: str) -> str:
     return ws_base + path
 
 
-def build_twiml_stream(stream_ws_url: str, custom_parameters: Optional[Dict[str, str]] = None) -> str:
+def build_twiml_stream(stream_ws_url: str, custom_parameters: Optional[Dict[str, str]] = None, *, ring=0) -> str:
     parts = ['<?xml version="1.0" encoding="UTF-8"?>', "<Response>"]
+    if ring:
+        parts.append(f'<Pause length="{int(ring)}"/>')
 
     # Optionnel: TTS Twilio avant le stream (défaut vide)
     if TWILIO_SAY_BEFORE_STREAM:
@@ -179,7 +191,7 @@ def validate_e164(number: str) -> bool:
 def _twilio_client() -> TwilioClient:
     _require_env("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID)
     _require_env("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN)
-    return TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+    return TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, http_client=TwilioHttpClient(timeout=8))
 
 
 # ============================================================
@@ -246,6 +258,11 @@ class PreparedCall:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     number_session: int = 0
+    run_id: str = ""
+    player_id: str = ""
+    scenario_time: str = ""
+    managed_greeting: bool = False
+    participant_phone: str = field(default="", repr=False)
 
 
 PREPARED: Dict[str, PreparedCall] = {}
@@ -518,7 +535,8 @@ async def twilio_sender_loop(websocket, ctx, queue, recording):
 
 
 async def twilio_receiver_loop(websocket, ctx, session, converter, recording, initiated_by):
-    greeting_pending = initiated_by == "admin"
+    greeting = openai_live_phone.greeting_for(initiated_by)
+    greeting_pending = bool(greeting)
     while True:
         event = await websocket.receive_json()
         kind = event.get("event")
@@ -551,7 +569,7 @@ async def twilio_receiver_loop(websocket, ctx, session, converter, recording, in
             ctx.optional_events.add(event_id)
             await asyncio.wait_for(openai_live_phone.send(
                 session, "session.commentary.append", event_id=event_id,
-                delegation_id=None, content=openai_live_phone.GREETING,
+                delegation_id=None, content=greeting,
             ), timeout=3)
 
 
@@ -598,7 +616,7 @@ async def health():
         "model": openai_live_phone.MODEL,
         "phone_provider": VOICE_CALL_PROVIDER,
         "phone_codec": OPENAI_PHONE_CODEC,
-        "phone_provider_configured": bool(OPENAI_API_KEY and VOICE_CALL_PROVIDER == "openai" and OPENAI_PHONE_CODEC in openai_live_phone.AUDIO_FORMATS),
+            "phone_provider_configured": bool(OPENAI_API_KEY and VOICE_CALL_PROVIDER == "openai" and OPENAI_PHONE_CODEC in openai_live_phone.AUDIO_FORMATS),
         "twilio_configured": bool(TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and TWILIO_FROM_NUMBER),
         "public_base_url": PUBLIC_BASE_URL,
         "prepared_sessions": len(PREPARED),
@@ -957,6 +975,160 @@ async def quest_launch_transcript(launch_id: str, request: Request):
     return {"ok": True, "ack": True, "launch_id": launch_id}
 
 
+def actor_lines():
+    lines = {role: number for role, number in TWILIO_ACTOR_NUMBERS.items() if number}
+    if any(not validate_e164(number) for number in lines.values()) or len(set(lines.values())) != len(lines):
+        raise HTTPException(status_code=503, detail="Configuration des lignes Twilio invalide.")
+    return lines
+
+
+def frontend_request(action, payload):
+    if not MAIN_APP_BASE_URL or not INTERNAL_APP_TOKEN:
+        raise HTTPException(status_code=503, detail="SYNIAL indisponible.")
+    try:
+        result = requests.post(
+            f"{MAIN_APP_BASE_URL}/internal/comms/{action}", json=payload,
+            headers={"X-Internal-Token": INTERNAL_APP_TOKEN}, timeout=(2, 3),
+        )
+        if result.status_code == 404:
+            return None
+        result.raise_for_status()
+        return result.json()
+    except (requests.RequestException, ValueError):
+        raise HTTPException(status_code=503, detail="SYNIAL indisponible.") from None
+
+
+async def signed_twilio_form(request):
+    form = await request.form()
+    url = f"{PUBLIC_BASE_URL}{request.url.path}"
+    if request.url.query:
+        url += "?" + request.url.query
+    if (not TWILIO_AUTH_TOKEN or not form.get("AccountSid") == TWILIO_ACCOUNT_SID
+            or not RequestValidator(TWILIO_AUTH_TOKEN).validate(url, form, request.headers.get("X-Twilio-Signature", ""))):
+        raise HTTPException(status_code=403, detail="Signature Twilio invalide.")
+    return form
+
+
+async def prepare_live_call(body, ai_role, initiated_by):
+    if body.get("run_id") and (not ENABLE_TRANSCRIPTIONS or VOICE_CALL_PROVIDER != "openai" or not OPENAI_API_KEY):
+        raise RuntimeError("Managed calls require voice and transcription configuration")
+    call_id = uuid.uuid4().hex
+    created = time.time()
+    briefing = json.dumps(body["briefing"], ensure_ascii=False) if isinstance(body.get("briefing"), dict) else None
+    config = openai_live_phone.phone_session(
+        ai_role, "callback" if briefing and initiated_by == "player" else initiated_by,
+        str(body.get("player_role") or ""), str(body.get("history_text") or ""), OPENAI_PHONE_CODEC,
+        briefing=briefing,
+    )
+    cm = openai_live_phone.connect(OPENAI_API_KEY, config)
+    upstream = await cm.__aenter__()
+    pc = PreparedCall(
+        call_id=call_id, created_at=created, expires_at=created + PREPARED_SESSION_TTL_SECONDS,
+        player_name=str(body.get("player_name") or "Joueur"), initiated_by=initiated_by, ai_role=ai_role,
+        codec=OPENAI_PHONE_CODEC, stream_token=uuid.uuid4().hex, upstream_cm=cm, upstream=upstream,
+        number_session=int(body.get("number_session") or 0), run_id=str(body.get("run_id") or ""),
+        player_id=str(body.get("player_id") or ""), scenario_time=str(body.get("scenario_time") or ""),
+        managed_greeting=bool(briefing), twilio_call_sid=body.get("call_sid"),
+        participant_phone=str(body.get("to") or ""),
+    )
+    async with PREPARED_LOCK:
+        previous = next((call for call in PREPARED.values()
+                         if pc.twilio_call_sid and call.twilio_call_sid == pc.twilio_call_sid), None)
+        if not previous:
+            PREPARED[call_id] = pc
+    if previous:
+        await cm.__aexit__(None, None, None)
+        return previous
+    pc.cleanup_task = asyncio.create_task(_cleanup_expired_call(call_id))
+    return pc
+
+
+def prepared_twiml(pc, *, ring=0):
+    return build_twiml_stream(
+        _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream"),
+        {"call_id": pc.call_id, "stream_token": pc.stream_token}, ring=ring,
+    )
+
+
+@app.get("/api/lines")
+async def api_lines(request: Request):
+    _require_admin_api_key(request)
+    return {"lines": actor_lines()}
+
+
+@app.get("/api/lines/capabilities")
+async def api_line_capabilities(request: Request):
+    _require_admin_api_key(request)
+    lines = actor_lines()
+
+    def check():
+        client = _twilio_client()
+        report = {}
+        for role, number in lines.items():
+            matches = client.incoming_phone_numbers.list(phone_number=number, limit=2)
+            resource = next((item for item in matches if item.phone_number == number), None)
+            report[role] = {"present": bool(resource), "voice": False, "sms": False}
+            if resource:
+                capabilities = {key.lower(): value for key, value in resource.capabilities.items()}
+                report[role].update(voice=bool(capabilities.get("voice")), sms=bool(capabilities.get("sms")))
+        return {"lines": report}
+
+    return await asyncio.to_thread(check)
+
+
+@app.post("/twilio/sms")
+async def twilio_sms(request: Request):
+    form = await signed_twilio_form(request)
+    actor = next((role for role, number in actor_lines().items() if number == form.get("To")), None)
+    sid = str(form.get("MessageSid") or "")
+    if actor and re.fullmatch(r"SM[a-fA-F0-9]{32}", sid):
+        result = await asyncio.to_thread(frontend_request, "inbound_sms", {
+            "from": form.get("From"), "to": form.get("To"), "actor": actor,
+            "provider_id": sid, "body": str(form.get("Body") or "")[:1600],
+        })
+        if result and result.get("service_message"):
+            return Response(f"<Response><Message>{_xml_escape(result['service_message'])}</Message></Response>",
+                            media_type="application/xml")
+    return Response("<Response/>", media_type="application/xml")
+
+
+@app.post("/api/send_sms")
+async def api_send_sms(request: Request):
+    _require_admin_api_key(request)
+    body = await request.json()
+    number = actor_lines().get(body.get("actor"))
+    destination, message, job = (str(body.get(key) or "").strip() for key in ("to", "body", "job_id"))
+    if (not number or not validate_e164(destination) or not 1 <= len(message) <= 600
+            or not re.fullmatch(r"[a-f0-9]{32}", job)
+            or (ALLOWED_TO_PREFIXES and not any(destination.startswith(p) for p in ALLOWED_TO_PREFIXES))):
+        raise HTTPException(status_code=422, detail="SMS invalide.")
+    approved = await asyncio.to_thread(frontend_request, "authorize_sms", {
+        "job_id": job, "to": destination, "from": number, "actor": body.get("actor"), "body": message,
+    })
+    if not approved:
+        raise HTTPException(status_code=409, detail="Envoi devenu caduc.")
+
+    try:
+        result = await asyncio.to_thread(
+            _twilio_client().messages.create, to=destination, from_=number, body=message,
+            status_callback=f"{PUBLIC_BASE_URL}/twilio/sms/status?job={job}", validity_period=120,
+        )
+    except TwilioRestException as exc:
+        logger.warning("Twilio SMS rejected status=%s code=%s", exc.status, exc.code)
+        raise HTTPException(status_code=422 if exc.status < 500 else 502, detail="Envoi Twilio incomplet.") from None
+    return {"provider_id": result.sid, "status": result.status}
+
+
+@app.post("/twilio/sms/status")
+async def twilio_sms_status(request: Request):
+    form = await signed_twilio_form(request)
+    await asyncio.to_thread(frontend_request, "sms_status", {
+        "job_id": request.query_params.get("job"), "provider_id": form.get("MessageSid"),
+        "status": form.get("MessageStatus"),
+    })
+    return Response(status_code=204)
+
+
 @app.post("/api/prepare_call")
 async def api_prepare_call(request: Request):
     if not VOICE_ADMIN_API_KEY:
@@ -973,7 +1145,6 @@ async def api_prepare_call(request: Request):
         if OPENAI_PHONE_CODEC not in openai_live_phone.AUDIO_FORMATS:
             raise ValueError("OPENAI_PHONE_CODEC must be pcm or pcmu")
         _require_env("OPENAI_API_KEY", OPENAI_API_KEY)
-        _require_env("TWILIO_FROM_NUMBER", TWILIO_FROM_NUMBER)
         _require_env("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID)
         _require_env("TWILIO_AUTH_TOKEN", TWILIO_AUTH_TOKEN)
     except Exception as e:
@@ -981,16 +1152,18 @@ async def api_prepare_call(request: Request):
 
     body = await request.json()
     to_number = str(body.get("to", "")).strip()
-    player_name = str(body.get("player_name", "Joueur")).strip() or "Joueur"
-    number_session = int(body.get("number_session") or 0)
-    history_text = str(body.get("history_text") or "").strip()
-    player_role = str(body.get("player_role") or "").strip()
     initiated_by = str(body.get("initiated_by") or "admin").strip().lower()
     if initiated_by not in {"admin", "player"}:
         initiated_by = "admin"
     ai_role = normalize_ai_role(str(body.get("ai_role") or "journaliste"))
     if ai_role not in openai_live_phone.ROLES:
+        if body.get("run_id"):
+            raise HTTPException(status_code=400, detail="Interlocuteur inconnu.")
         ai_role = "journaliste"
+    lines = actor_lines()
+    from_number = lines.get(ai_role) if lines or body.get("run_id") else TWILIO_FROM_NUMBER
+    if not from_number:
+        raise HTTPException(status_code=503, detail="Ce personnage n’a pas de ligne Twilio.")
 
     if not to_number or not validate_e164(to_number):
         raise HTTPException(status_code=400, detail="Invalid 'to' (expected E.164 like +336...) ")
@@ -998,56 +1171,23 @@ async def api_prepare_call(request: Request):
     if ALLOWED_TO_PREFIXES and not any(to_number.startswith(p) for p in ALLOWED_TO_PREFIXES):
         raise HTTPException(status_code=403, detail="This destination number is not allowed")
 
-    call_id = uuid.uuid4().hex
     t0 = time.time()
 
     try:
-        config = openai_live_phone.phone_session(ai_role, initiated_by, player_role, history_text, OPENAI_PHONE_CODEC)
-        cm = openai_live_phone.connect(OPENAI_API_KEY, config)
-        session = await cm.__aenter__()
+        pc = await prepare_live_call(body, ai_role, initiated_by)
     except Exception as e:
-        logger.error("[%s] voice connection failed provider=%s error_type=%s", call_id, VOICE_CALL_PROVIDER, type(e).__name__)
+        logger.error("voice connection failed provider=%s error_type=%s", VOICE_CALL_PROVIDER, type(e).__name__)
         raise HTTPException(status_code=502, detail="Le moteur vocal est indisponible. Aucun appel n'a été lancé.") from None
-
-    pc = PreparedCall(
-        number_session=number_session,
-        call_id=call_id,
-        created_at=t0,
-        expires_at=t0 + PREPARED_SESSION_TTL_SECONDS,
-        player_name=player_name,
-        initiated_by=initiated_by,
-        ai_role=ai_role,
-        codec=OPENAI_PHONE_CODEC,
-        stream_token=uuid.uuid4().hex,
-        upstream_cm=cm,
-        upstream=session,
-        state="ready",
-    )
-
-    async with PREPARED_LOCK:
-        PREPARED[call_id] = pc
-
-    pc.cleanup_task = asyncio.create_task(_cleanup_expired_call(call_id))
+    call_id = pc.call_id
 
     try:
-        stream_ws_url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream")
-        twiml = build_twiml_stream(
-            stream_ws_url,
-            custom_parameters={
-                "call_id": call_id,
-                "stream_token": pc.stream_token,
-                "ai_role": ai_role,
-                "number_session": str(number_session),
-                "initiated_by": initiated_by,
-                "player_name": player_name[:80],
-            }
-        )
+        twiml = prepared_twiml(pc)
 
         def _do_call() -> str:
             client = _twilio_client()
             call = client.calls.create(
                 to=to_number,
-                from_=TWILIO_FROM_NUMBER,
+                from_=from_number,
                 twiml=twiml,
                 machine_detection="Enable",
                 async_amd=True,
@@ -1074,15 +1214,54 @@ async def api_prepare_call(request: Request):
         raise HTTPException(status_code=502, detail="Twilio n'a pas pu lancer l'appel.") from None
 
 
-@app.api_route("/twilio/voice", methods=["GET", "POST"])
-async def twilio_voice():
-    raise HTTPException(status_code=404, detail="Utilisez le lancement d’appel SYNIAL.")
+@app.post("/twilio/voice")
+async def twilio_voice(request: Request):
+    started = time.monotonic()
+    form = await signed_twilio_form(request)
+    actor = next((role for role, number in actor_lines().items() if number == form.get("To")), None)
+    sid = str(form.get("CallSid") or "")
+    rejected = Response('<Response><Reject reason="rejected"/></Response>', media_type="application/xml")
+    if not actor or not re.fullmatch(r"CA[a-fA-F0-9]{32}", sid):
+        return rejected
+    async with PREPARED_LOCK:
+        prior = next((pc for pc in PREPARED.values() if pc.twilio_call_sid == sid), None)
+    if prior:
+        return Response(prepared_twiml(prior), media_type="application/xml")
+    body = await asyncio.to_thread(frontend_request, "resolve", {
+        "from": form.get("From"), "to": form.get("To"), "actor": actor, "channel": "voice", "provider_id": sid,
+    })
+    if not body:
+        return rejected
+    try:
+        pc = await asyncio.wait_for(prepare_live_call({**body, "call_sid": sid}, actor, "inbound"), timeout=5)
+    except Exception as exc:
+        logger.warning("Inbound voice preparation failed: %s", type(exc).__name__)
+        return rejected
+    ring = max(0, round(random.randint(INBOUND_RING_MIN, INBOUND_RING_MAX) - (time.monotonic() - started)))
+    return Response(prepared_twiml(pc, ring=ring), media_type="application/xml")
+
+
+async def checkpoint_call(prepared, ctx, deltas):
+    last_count = 0
+    while True:
+        await asyncio.sleep(10)
+        if len(deltas) == last_count:
+            continue
+        count = len(deltas)
+        try:
+            await asyncio.to_thread(frontend_request, "call_snapshot", {
+                "run_id": prepared.run_id, "provider_id": ctx.call_sid,
+                "turns": openai_live_phone.transcript_turns(deltas),
+            })
+        except HTTPException:
+            continue
+        last_count = count
 
 
 @app.api_route("/twilio/amd_callback", methods=["GET", "POST"])
 async def twilio_amd_callback(request: Request):
     """Twilio AMD (Answering Machine Detection) callback."""
-    form = await request.form()
+    form = await signed_twilio_form(request)
     call_sid = str(form.get("CallSid", ""))
     answered_by = str(form.get("AnsweredBy", ""))
     logger.info("[amd] callSid=%s answeredBy=%s", call_sid, answered_by)
@@ -1106,6 +1285,15 @@ async def receive_twilio_start(websocket):
 
 @app.websocket("/twilio/stream")
 async def twilio_stream(websocket: WebSocket):
+    url = _to_wss_url(PUBLIC_BASE_URL, "/twilio/stream") if PUBLIC_BASE_URL else ""
+    signature = websocket.headers.get("X-Twilio-Signature", "")
+    # Legacy callers retain the single-use token. Managed lines require both controls.
+    if actor_lines() and (not TWILIO_AUTH_TOKEN or not url or not any(
+        RequestValidator(TWILIO_AUTH_TOKEN).validate(candidate, {}, signature)
+        for candidate in (url, url + "/")
+    )):
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     call_id = "unattached"
     prepared = None
@@ -1115,6 +1303,7 @@ async def twilio_stream(websocket: WebSocket):
     stopping = asyncio.Event()
     deltas = []
     io_tasks = []
+    checkpoint = None
     live_receiver = None
     close_code = 1000
 
@@ -1149,16 +1338,31 @@ async def twilio_stream(websocket: WebSocket):
         call_id = prepared.call_id
         if prepared.cleanup_task:
             prepared.cleanup_task.cancel()
+        if prepared.run_id:
+            allowed = await asyncio.to_thread(frontend_request, "call_started", {
+                "run_id": prepared.run_id, "player_id": prepared.player_id,
+                "actor": prepared.ai_role, "provider_id": call_sid,
+                "direction": "in" if prepared.initiated_by == "inbound" else "out",
+                "scenario_time": prepared.scenario_time, "phone": prepared.participant_phone,
+            })
+            if not allowed:
+                await websocket.close(code=1008)
+                return
         ctx = StreamContext(stream_sid, call_sid)
         if ENABLE_TRANSCRIPTIONS and prepared.number_session:
             recording = CallRecording(VOICE_RECORD_MAX_SECONDS)
         converter = AudioConverter(prepared.codec)
         session = prepared.upstream
         io_tasks = [
-            asyncio.create_task(twilio_receiver_loop(websocket, ctx, session, converter, recording, prepared.initiated_by)),
+            asyncio.create_task(twilio_receiver_loop(
+                websocket, ctx, session, converter, recording,
+                "callback" if prepared.managed_greeting and prepared.initiated_by == "player" else prepared.initiated_by,
+            )),
             asyncio.create_task(twilio_sender_loop(websocket, ctx, queue, recording)),
         ]
         live_receiver = asyncio.create_task(openai_phone_receiver_loop(session, converter, queue, deltas, stopping, ctx))
+        if prepared.run_id and recording is not None:
+            checkpoint = asyncio.create_task(checkpoint_call(prepared, ctx, deltas))
         done, _ = await asyncio.wait([*io_tasks, live_receiver], return_when=asyncio.FIRST_COMPLETED)
         for task in done:
             task.result()
@@ -1168,6 +1372,9 @@ async def twilio_stream(websocket: WebSocket):
         logger.warning("[%s] phone stream ended error_type=%s", call_id, type(exc).__name__)
     finally:
         stopping.set()
+        if checkpoint is not None:
+            checkpoint.cancel()
+            await asyncio.gather(checkpoint, return_exceptions=True)
         if ctx is not None:
             ctx.ended_at = time.monotonic()
         for task in io_tasks:
@@ -1233,6 +1440,10 @@ async def enqueue_phone_record(postcall, prepared, ctx, recording, deltas, final
         "player_name": prepared.player_name, "initiated_by": prepared.initiated_by, "ai_role": prepared.ai_role,
         "transcript_source": "live" if turns else "no_exchange",
     }
+    if getattr(prepared, "run_id", ""):
+        payload.update(run_id=prepared.run_id, player_id=prepared.player_id,
+                       scenario_time=prepared.scenario_time, direction="in" if prepared.initiated_by == "inbound" else "out",
+                       partial=fallback or not finalized)
     if fallback and recording.truncated:
         payload["transcript_recording_truncated"] = True
         logger.warning("[%s] phone recovery recording reached its duration limit", prepared.call_id)

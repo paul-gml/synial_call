@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 
 import websockets
 
-from phone_dialogue import GREETING, ROLES, build_phone_dialogue
+from phone_dialogue import CALLBACK_GREETING, GREETING, INBOUND_GREETING, ROLES, build_phone_dialogue
 
 
 MODEL = os.getenv("OPENAI_PHONE_MODEL", "").strip() or "gpt-live-1"
@@ -24,14 +24,19 @@ AUDIO_FORMATS = {
 }
 
 
-def phone_session(ai_role, initiated_by, player_role, history, codec=DEFAULT_CODEC):
-    instructions, context = build_phone_dialogue(ai_role, initiated_by, player_role, history)
+def greeting_for(initiated_by):
+    return {"admin": GREETING, "inbound": INBOUND_GREETING, "callback": CALLBACK_GREETING}.get(initiated_by)
+
+
+def phone_session(ai_role, initiated_by, player_role, history, codec=DEFAULT_CODEC, briefing=None):
+    instructions, context = build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing)
     voice = os.getenv(f"OPENAI_PHONE_VOICE_{ai_role.upper()}", "").strip() or ROLES[ai_role].voice
     if voice.startswith("voice_"):
         voice = {"id": voice}
     items = [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": context}]}]
-    if initiated_by == "admin":
-        items.append({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": GREETING}]})
+    greeting = greeting_for(initiated_by)
+    if greeting:
+        items.append({"type": "message", "role": "developer", "content": [{"type": "input_text", "text": greeting}]})
     return {
         "model": MODEL,
         "instructions": instructions,

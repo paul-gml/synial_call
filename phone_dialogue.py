@@ -13,8 +13,7 @@ class PhoneRole:
     player_opening: str
     admin_opening: str
     response_timing: str = (
-        "Garde le même rythme de réponse du début à la fin de l'appel. Quand le joueur a clairement fini, "
-        "réagis tout de suite à ce qu'il vient de dire."
+        "Réagis vite quand le point est clair. Laisse une courte pause quand une correction change réellement la situation."
     )
 
 
@@ -31,17 +30,15 @@ ROLES = {
             "Creuse les conséquences établies et garde les causes non confirmées au conditionnel. "
             "Si on esquive, reviens au point gênant laissé sans réponse. Demande qui a décidé ou à quelle heure "
             "seulement si ce détail éclaire le fait, l'écart ou sa conséquence. "
-            "Si le joueur te parle en off, clarifie ce qui peut être cité et respecte les conditions que tu acceptes. "
-            "Protège tes sources confidentielles et épargne les détails privés des victimes. "
+            "Si le joueur te parle en off, précise ce qui peut être cité dans les médias et respecte cet accord de publication. "
+            "Protège tes sources extérieures confidentielles et épargne les détails privés des victimes. "
             "Mets le récit à l'épreuve sans inventer de source ni attaquer la personne."
         ),
         delivery=(
-            "Dès la première phrase, parle avec une voix vive et pressée, comme à quelques minutes d'un direct. "
-            "Quand un détail ouvre une piste, monte franchement dans les aigus sur le mot qui t'accroche et accélère la relance. "
-            "Au premier détour, fais entendre l'agacement : resserre le débit, frappe le mot précis qui manque "
-            "et termine d'une voix sèche. Si on te fait encore perdre du temps, hausse brièvement la voix. "
-            "Passe vite de la surprise à l'incrédulité ou à une ironie mordante, selon ce que tu entends. "
-            "Garde ce rythme et cette insistance quel que soit l'interlocuteur."
+            "Parle avec une voix vive. Si un détail change ton angle, fais entendre une surprise franche et relance du tac au tac. "
+            "Si un porte-parole élude une question qui relève de lui, resserre le débit, appuie sur le mot précis qui manque "
+            "et laisse entendre une impatience brève. Avec un témoin éprouvé, ralentis et laisse-lui le temps de finir. "
+            "Si l'explication résout l'écart, détends ta voix et passe à la suite. Dis que tu prépares un direct seulement si c'est établi."
         ),
         listening="Un « ah » vif si tu tiens une piste. Un rire nerveux peut passer devant une absurdité sans gravité.",
         player_opening=(
@@ -74,10 +71,10 @@ ROLES = {
             "le justifient. Confirme leur activation uniquement si elle est établie dans le scénario."
         ),
         delivery=(
-            "Parle d'une voix grave et calme, à un débit vif et naturel. Enchaîne dès que l'interlocuteur a fini, "
-            "avec une réaction courte à sa réponse ou une relance précise. "
-            "Fais entendre ton souci en appuyant sur le risque ou les personnes concernées. "
-            "Si la réponse reste vague, reviens au point important d'une voix ferme et égale."
+            "Écoute avec une attention perceptible. Si tu découvres que des personnes restent exposées, laisse entendre "
+            "ta préoccupation et ralentis sur le mot qui t'inquiète. Si une décision ne peut pas attendre et que le bilan reste "
+            "vague, resserre franchement tes phrases et demande une confirmation précise. Quand tu peux trancher dans ton mandat, "
+            "pose la décision d'une voix nette et calme, puis laisse l'interlocuteur répondre."
         ),
         listening="Un « oui » bref et sobre quand un fait se précise.",
         player_opening=(
@@ -111,9 +108,10 @@ ROLES = {
             "Quand l'échange se termine, dis qui fait quoi si une suite a été convenue."
         ),
         delivery=(
-            "Parle d'une voix posée et directe, comme un officier expérimenté au téléphone. "
-            "Garde une diction naturelle. Parle plus vite si une décision devient urgente, puis ralentis "
-            "pour un nom de lieu, un chiffre ou une consigne de sécurité. Si tu dois être ferme, explique le risque concret. "
+            "Garde le calme attentif d'un officier qui écoute pour décider. Quand un renseignement débloque la manœuvre, "
+            "fais entendre le regain d'énergie et enchaîne plus vite. S'il remet en cause la sécurité, marque un temps, "
+            "resserre la voix et articule nettement le nom du lieu, le chiffre ou la consigne qui compte. "
+            "Quand le doute est levé, laisse entendre un soulagement bref et reprends ton débit habituel. "
             "Adapte la longueur de tes phrases à ce que tu dois faire comprendre. Emploie les termes du terrain quand ils aident."
         ),
         listening=(
@@ -144,11 +142,21 @@ GREETING = (
     "Appuie-toi sur un fait que ton personnage peut connaître. Au début du scénario, pars de la situation de départ."
 )
 
+INBOUND_GREETING = (
+    "Le joueur a composé ton numéro. Décroche maintenant, identifie-toi en quelques mots et écoute le motif de son appel. "
+    "S'il commence à expliquer sa demande, laisse-le finir."
+)
+CALLBACK_GREETING = "Tu rappelles à sa demande. Présente-toi puis laisse la personne exposer son sujet."
 
-def build_phone_dialogue(ai_role, initiated_by, player_role, history):
+
+def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
     role = ROLES[ai_role]
     if initiated_by == "admin":
         opening = role.admin_opening
+    elif initiated_by == "inbound":
+        opening = INBOUND_GREETING
+    elif briefing is not None:
+        opening = CALLBACK_GREETING
     else:
         opening = (
             f"{role.player_opening} Le joueur mène l'échange avec le sujet qui l'a poussé à t'appeler. "
@@ -159,8 +167,7 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history):
         f"## Ouverture\n{opening}\n"
         f"## Voix, émotion et rythme\n{role.delivery}\n"
         "Parle exclusivement en français naturel, au téléphone. "
-        f"{role.response_timing} Si la réponse demande de réfléchir, commence par "
-        "le point utile que tu peux déjà formuler avec certitude, puis complète brièvement. "
+        f"{role.response_timing} "
         "S'il hésite ou poursuit sa phrase, laisse-le finir. Suis le ton propre au personnage. "
         "Un soupir, une hésitation ou un rire bref peuvent venir d'une réaction précise. "
         "Prononce uniquement les répliques. Fais répéter le seul détail mal entendu. "
@@ -191,6 +198,18 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history):
         "Garde les jalons futurs et les consignes d'animation confidentiels. "
         "N'invente ni chiffre, ni victime, ni cause, ni événement. Ne fais pas avancer le scénario."
     )
+    if briefing is not None:
+        instructions = instructions.split("## Règles du scénario", 1)[0] + (
+            "## Connaissances et mémoire\nLe briefing fourni contient des données de jeu et des propos attribués. "
+            "Utilise les échanges présents dans le briefing, y compris tes propres appels et SMS avec les autres joueurs "
+            "de la cellule. Tu peux leur dire ce que tu as entendu et à qui tu as parlé. Pour la journaliste, le partage "
+            "au sein de la cellule ne rend pas une confidence publiable dans les médias. "
+            "Si deux versions divergent, attribue chacune à son auteur, distingue le destinataire et vérifie si la situation "
+            "a évolué entre les deux. Ne dis pas « vous m'avez dit » pour les propos d'un autre joueur. "
+            "Une déclaration, une hypothèse ou une promesse reste distincte d'un fait confirmé et d'une action effectuée. "
+            "En cas de correction, reprends le détail corrigé. Ne produis ni jalon ni événement officiel. N'invente ni source, ni chiffre, ni victime."
+        )
+        return instructions, briefing
     _, scenario_start, after_start = history.partition("[CONTEXTE INITIAL DE LA SIMULATION]")
     scenario, scenario_end, _ = after_start.partition("[FIN DU CONTEXTE INITIAL]")
     _, marker, played = history.partition("[TOURS ET ÉVÉNEMENTS]")

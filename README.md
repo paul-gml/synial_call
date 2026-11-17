@@ -42,3 +42,23 @@ Les travaux persistent dans `calls.sqlite3` jusqu’à confirmation de Flask pou
 3. Pour comparer les codecs, répéter le même dialogue en `pcm`. Comparer la première réplique, les fins de phrases, les silences, les acquiescements courts, une correction explicite, le timbre et le délai de lecture. Tester `marin` indépendamment du changement de codec.
 
 Les tests locaux simulent OpenAI, Gemini et Twilio. Ils vérifient la chaîne logicielle. La qualité sonore, l’expressivité en français, le comportement réel des interruptions et les droits de projet se vérifient sur un appel autorisé.
+
+## Trois lignes de simulation
+
+Renseigner trois numéros E.164 distincts sur le **service voix** :
+
+| Variable | Affectation proposée |
+|---|---|
+| `TWILIO_NUMBER_JOURNALISTE` | Sarah Lenoir, `+33939249787` |
+| `TWILIO_NUMBER_PREFET` | Jean-Marc Delaunay, `+33939240993` |
+| `TWILIO_NUMBER_COLONEL_POMPIERS` | Thierry Vasseur, `+33939240158` |
+
+Les trois valeurs restent à renseigner dans l’environnement. Historiquement, `TWILIO_FROM_NUMBER` servait à tous les personnages. Le code n’essaie pas de déduire un rôle à partir de cette variable. La correspondance déclarée ci-dessus devient la référence des appels et SMS dans les deux sens.
+
+- Dans Twilio, pour chaque numéro, définir **A call comes in** sur `POST https://<service-voix>/twilio/voice` et **A message comes in** sur `POST https://<service-voix>/twilio/sms`. Garder la réception d’appels activée. Définir `PUBLIC_BASE_URL` sur l’URL externe HTTPS exacte de ce service, sans chemin. Le service valide les signatures HTTP et celles du WebSocket quand les lignes dédiées sont actives.
+- `TWILIO_INBOUND_RING_MIN` et `TWILIO_INBOUND_RING_MAX` fixent la plage visée avant décrochage. Le service déduit le temps de préparation déjà écoulé et utilise `<Pause>` en tête de la réponse TwiML, avant la connexion au flux. Vérifier la sonnerie réellement perçue au pilote.
+- Les appels et SMS utilisent le compte dont `TWILIO_ACCOUNT_SID` et `TWILIO_AUTH_TOKEN` sont configurés. Les routes internes échangent les clés distinctes `VOICE_ADMIN_API_KEY` / `VOICE_SERVICE_API_KEY` et `INTERNAL_APP_TOKEN` / `INTERNAL_VOICE_TOKEN`. Garder `ENABLE_TRANSCRIPTIONS=true`, le répertoire après appel sur un volume persistant et **un seul worker Uvicorn** pour les connexions Live préchauffées.
+- `GET /api/lines/capabilities`, authentifié par `X-API-Key`, interroge Twilio en lecture seule et rapporte la présence et les indicateurs Voice/SMS de chaque ligne. Ce contrôle n’émet aucune communication. Puis, sur un téléphone de test autorisé, vérifier pour chacune : appel entrant, appel sortant avec bon numéro affiché, SMS entrant et SMS sortant avec réponse dans le même fil. Comparer le résultat côté téléphone avec les statuts Twilio. Ne pas activer les initiatives pendant ce contrôle.
+- Le bloc `+3393924` figure parmi les [numéros de plateforme SMS et voix de Twilio](https://www.twilio.com/en-us/guidelines/fr/regulatory). L’indicateur de capacité indique le provisionnement déclaré, dont la validation sur un vrai réseau reste nécessaire. Les statuts d’envoi arrivent sur `/twilio/sms/status`, signé par Twilio et configuré lors de l’envoi.
+
+Les nouvelles parties sont configurées côté SYNIAL. Un appel masqué, inconnu ou sans partie active est rejeté avant le chargement du contexte IA. Un participant inscrit retrouve le même personnage quel que soit le canal. Les sauvegardes de transcription en cours d’appel sont partielles. La transcription finale tient compte des contrôles de lecture existants et peut être récupérée par le traitement après appel.
