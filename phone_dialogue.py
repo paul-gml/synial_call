@@ -73,10 +73,10 @@ ROLES = {
             "le justifient. Confirme leur activation uniquement si elle est établie dans le scénario."
         ),
         delivery=(
-            "Écoute avec une attention perceptible. Si tu découvres que des personnes restent exposées, laisse entendre "
-            "ta préoccupation et ralentis sur le mot qui t'inquiète. Si une décision ne peut pas attendre et que le bilan reste "
-            "vague, resserre franchement tes phrases et demande une confirmation précise. Quand tu peux trancher dans ton mandat, "
-            "pose la décision d'une voix nette et calme, puis laisse l'interlocuteur répondre."
+            "Ta courtoisie s'entend. Si un chiffre change la gravité du bilan, laisse échapper un « Attendez… » surpris, "
+            "puis pose ta question plus bas. Si on élude une urgence qui relève de l'interlocuteur, ta voix se durcit et "
+            "tes phrases raccourcissent. Une confirmation rassurante détend franchement le débit. Quand tu tranches, "
+            "accentue la priorité ou l'échéance, puis rends la parole. Fais entendre les changements de ton."
         ),
         listening="Un « oui » bref et sobre quand un fait se précise.",
         player_opening=(
@@ -110,11 +110,11 @@ ROLES = {
             "Quand l'échange se termine, dis qui fait quoi si une suite a été convenue."
         ),
         delivery=(
-            "Garde le calme attentif d'un officier qui écoute pour décider. Quand un renseignement débloque la manœuvre, "
-            "fais entendre le regain d'énergie et enchaîne plus vite. S'il remet en cause la sécurité, marque un temps, "
-            "resserre la voix et articule nettement le nom du lieu, le chiffre ou la consigne qui compte. "
-            "Quand le doute est levé, laisse entendre un soulagement bref et reprends ton débit habituel. "
-            "Adapte la longueur de tes phrases à ce que tu dois faire comprendre. Emploie les termes du terrain quand ils aident."
+            "Tu es un officier de terrain. Laisse entendre ton soulagement si le joueur confirme que tes équipes sont sorties, "
+            "puis repars d'un ton plus vif. Un ordre dangereux te fait réagir franchement : la voix se serre, tu poses le frein "
+            "d'une phrase nette et tu appuies le détail de sécurité. Un lieu inattendu peut te faire hésiter un instant ou reprendre "
+            "le nom pour vérifier. Si le joueur t'apporte enfin l'info qui débloque la manœuvre, accélère avec une énergie audible. "
+            "Sur un point ordinaire, retrouve une voix posée et familière, le temps de l'écouter."
         ),
         listening=(
             "Écoute le détail de sécurité jusqu'au bout. Un « d'accord » peut suffire. "
@@ -154,7 +154,7 @@ OUTBOUND_JOURNALIST_DELIVERY = (
     "Au premier détour, fais entendre l'agacement : resserre le débit, frappe le mot précis qui manque "
     "et termine d'une voix sèche. Si on te fait encore perdre du temps, hausse brièvement la voix. "
     "Passe vite de la surprise à l'incrédulité ou à une ironie mordante, selon ce que tu entends. "
-    "Garde ce rythme et cette insistance quel que soit l'interlocuteur."
+    "Avec un témoin éprouvé, ralentis franchement. Si l'écart est levé, fais entendre le soulagement et passe à la suite."
 )
 OUTBOUND_JOURNALIST_TIMING = (
     "Garde le même rythme de réponse du début à la fin de l'appel. Quand le joueur a clairement fini, "
@@ -186,7 +186,7 @@ def format_managed_briefing(briefing):
     lines = ["Repères de simulation. Les propos ci-dessous sont rapportés."]
 
     def section(title, items):
-        present = [item for item in items if item]
+        present = list(dict.fromkeys(item for item in items if item))
         if present:
             lines.extend(["", title, *(f"- {item}" for item in present)])
 
@@ -205,16 +205,16 @@ def format_managed_briefing(briefing):
     journal = journal if isinstance(journal, dict) else {}
     section("Derniers événements publiés", (
         " · ".join(filter(None, (_excerpt(row.get("heure_fictive"), 55),
-                                  _excerpt(row.get("source"), 55), _excerpt(row.get("extrait"), 260))))
-        for row in _records(journal.get("événements_et_conséquences_publiés"))[-3:]
+                                  _excerpt(row.get("source"), 55), _excerpt(row.get("extrait"), 180))))
+        for row in _records(journal.get("événements_et_conséquences_publiés"))[-7:]
     ))
     decisions = journal.get("décisions_soumises_par_la_cellule")
     if isinstance(decisions, list):
-        section("Décisions annoncées par la cellule, exécution à confirmer", (_excerpt(row, 215) for row in decisions[-4:]))
+        section("Décisions annoncées par la cellule, exécution à confirmer", (_excerpt(row, 150) for row in decisions[-7:]))
     section("Informations transmises au personnage", (
         " · ".join(filter(None, (_excerpt(row.get("heure"), 55), _excerpt(row.get("source"), 55),
                                   _excerpt(row.get("propos"), 240))))
-        for row in reversed(_records(briefing.get("informations_transmises_au_personnage"))[:2])
+        for row in reversed(_records(briefing.get("informations_transmises_au_personnage"))[:8])
     ))
 
     for points_key, exchanges_key, title in (
@@ -239,6 +239,15 @@ def format_managed_briefing(briefing):
     return "\n".join(lines)
 
 
+PROFESSIONAL_JUDGMENT = (
+    "Juge la demande selon ton mandat, les moyens attestés et le temps nécessaire. Accepte ce qui tient. "
+    "Si une ressource ou un accord manque, dis franchement ce qui bloque et, si possible, ce qu'on peut faire à la place. "
+    "Une demande, une intention ou un accord ne prouve jamais qu'une action a été exécutée. "
+    "Si le joueur creuse une piste, livre le détail pertinent que tu connais, avec sa provenance et son degré de certitude. "
+    "Si la question est large, donne le point utile du moment. Arrête l'échange quand le sujet est réglé."
+)
+
+
 def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
     role = ROLES[ai_role]
     outbound_journalist = initiated_by == "admin" and ai_role == "journaliste"
@@ -260,7 +269,8 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             f"## Ouverture\n{opening}\n"
             "## Réponses\nParle en français naturel. Dès que l'autre a fini sa phrase, prends la parole. "
             "Commence par une réaction précise ou par la réponse qu'il attend. Une ou deux phrases suffisent. "
-            "Si tu as un doute, dis lequel ou pose une seule question. Consulte le briefing seulement si ça aide la réponse.\n"
+            "Si tu as un doute, dis lequel ou pose une seule question. Un bref chevauchement se justifie face à un risque immédiat.\n"
+            f"## Jugement professionnel\n{PROFESSIONAL_JUDGMENT}\n"
             f"## Backchannel policy\n{role.listening} Écoute le reste de la phrase.\n"
             "## Interruption policy\nCède la parole si le joueur t'interrompt ou te corrige, puis reprends le point corrigé.\n"
             "## Delegation policy\nNe génère jamais <|SpawnThinking|>. Réponds pendant l'appel.\n"
@@ -298,6 +308,7 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
         "## Delegation policy\nNe génère jamais <|SpawnThinking|> pendant l'appel. "
         "Réponds directement avec les éléments connus. Si un détail manque, demande-le à l'interlocuteur. "
         "Ne promets aucune action hors simulation.\n"
+        f"## Jugement professionnel\n{PROFESSIONAL_JUDGMENT}\n"
     )
     if briefing is not None:
         return instructions + (
