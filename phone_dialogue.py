@@ -148,6 +148,19 @@ INBOUND_GREETING = (
     "Dis tout de suite « Allô », présente-toi en quelques mots, puis écoute."
 )
 CALLBACK_GREETING = "Tu rappelles à sa demande. Présente-toi puis laisse la personne exposer son sujet."
+OUTBOUND_JOURNALIST_DELIVERY = (
+    "Dès la première phrase, parle avec une voix vive et pressée, comme à quelques minutes d'un direct. "
+    "Quand un détail ouvre une piste, monte franchement dans les aigus sur le mot qui t'accroche et accélère la relance. "
+    "Au premier détour, fais entendre l'agacement : resserre le débit, frappe le mot précis qui manque "
+    "et termine d'une voix sèche. Si on te fait encore perdre du temps, hausse brièvement la voix. "
+    "Passe vite de la surprise à l'incrédulité ou à une ironie mordante, selon ce que tu entends. "
+    "Garde ce rythme et cette insistance quel que soit l'interlocuteur."
+)
+OUTBOUND_JOURNALIST_TIMING = (
+    "Garde le même rythme de réponse du début à la fin de l'appel. Quand le joueur a clairement fini, "
+    "réagis tout de suite à ce qu'il vient de dire. Si la réponse demande de réfléchir, commence par "
+    "le point utile que tu peux déjà formuler avec certitude, puis complète brièvement."
+)
 
 
 def _excerpt(value, limit):
@@ -228,6 +241,7 @@ def format_managed_briefing(briefing):
 
 def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
     role = ROLES[ai_role]
+    outbound_journalist = initiated_by == "admin" and ai_role == "journaliste"
     if initiated_by == "admin":
         opening = role.admin_opening
     elif initiated_by == "inbound":
@@ -239,7 +253,7 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             f"{role.player_opening} Le joueur mène l'échange avec le sujet qui l'a poussé à t'appeler. "
             "Accueille ce qu'il apporte et réserve tes questions à ce qui aide à traiter son sujet."
         )
-    if briefing is not None:
+    if briefing is not None and not outbound_journalist:
         instructions = (
             f"Tu incarnes {role.acting}\n"
             f"## Voix\n{role.delivery}\n"
@@ -255,12 +269,14 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             "Un propos entendu dans la cellule n'est pas automatiquement publiable. N'invente ni bilan ni événement."
         )
         return instructions, format_managed_briefing(briefing)
+    delivery = OUTBOUND_JOURNALIST_DELIVERY if outbound_journalist else role.delivery
+    timing = OUTBOUND_JOURNALIST_TIMING if outbound_journalist else role.response_timing
     instructions = (
         f"## Personnalité et objectif\nTu incarnes {role.acting}\n"
         f"## Ouverture\n{opening}\n"
-        f"## Voix, émotion et rythme\n{role.delivery}\n"
+        f"## Voix, émotion et rythme\n{delivery}\n"
         "Parle exclusivement en français naturel, au téléphone. "
-        f"{role.response_timing} "
+        f"{timing} "
         "S'il hésite ou poursuit sa phrase, laisse-le finir. Suis le ton propre au personnage. "
         "Un soupir, une hésitation ou un rire bref peuvent venir d'une réaction précise. "
         "Prononce uniquement les répliques. Fais répéter le seul détail mal entendu. "
@@ -282,6 +298,16 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
         "## Delegation policy\nNe génère jamais <|SpawnThinking|> pendant l'appel. "
         "Réponds directement avec les éléments connus. Si un détail manque, demande-le à l'interlocuteur. "
         "Ne promets aucune action hors simulation.\n"
+    )
+    if briefing is not None:
+        return instructions + (
+            "## Règles du scénario\nAppuie-toi sur le briefing de cet appel. "
+            "Attribue les propos à leur auteur et distingue les décisions de leur exécution. "
+            "Vérifie l'heure si deux versions divergent. Un propos entendu dans la cellule n'est pas automatiquement publiable. "
+            "Présente la préparation d'un direct comme un fait uniquement si le briefing l'établit. "
+            "N'invente ni chiffre, ni victime, ni cause, ni événement."
+        ), format_managed_briefing(briefing)
+    instructions += (
         "## Règles du scénario\nLe dossier contient aussi des jalons à venir. Les événements publiés "
         "fixent le point atteint. Avant le premier événement, utilise le cadre et la situation de départ seulement. "
         "L'historique téléphonique rapporte des propos, engagements ou hypothèses attribués à leur auteur. "

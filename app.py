@@ -493,13 +493,14 @@ async def openai_phone_receiver_loop(session, converter, queue, deltas, stopping
                 role = "user" if kind == "session.input_transcript.delta" else "assistant"
                 deltas.append((role, event))
         elif kind == "session.output_audio.delta" and not stopping.is_set():
+            received = ctx.position()
             for frame in converter.to_twilio(base64.b64decode(event["delta"], validate=True)):
                 if ctx.first_model_audio_ms is None:
                     ctx.first_model_audio_ms = ctx.position() * 1000 // TWILIO_RATE_HZ
                 if stopping.is_set():
                     ctx.playback_uncertain = True
                     break
-                await asyncio.wait_for(queue.put(frame), timeout=1)
+                await asyncio.wait_for(queue.put((frame, received)), timeout=1)
                 ctx.max_queue_frames = max(ctx.max_queue_frames, queue.qsize())
         elif kind == "session.delegation.created" and not stopping.is_set():
             delegation = event.get("delegation") or {}
@@ -520,7 +521,7 @@ async def twilio_sender_loop(websocket, ctx, queue, recording):
     sequence = 0
     lead = round(OPENAI_PHONE_PLAYBACK_LEAD_SECONDS * TWILIO_RATE_HZ)
     while True:
-        frame = await queue.get()
+        frame, received = await queue.get()
         sent = False
         try:
             wait = (ctx.sent_end + len(frame) - lead - ctx.position()) / TWILIO_RATE_HZ
@@ -534,7 +535,7 @@ async def twilio_sender_loop(websocket, ctx, queue, recording):
             sent = True
             ctx.sent_end = start + len(frame)
             if recording is not None:
-                recording.add("assistant", start, frame)
+                recording.add("assistant", start, frame, received_sample=received)
             if ctx.first_output_ms is None:
                 ctx.first_output_ms = start * 1000 // TWILIO_RATE_HZ
             sequence += 1
@@ -1464,11 +1465,11 @@ async def finish_phone_call(postcall, prepared, ctx, recording, deltas, queue, i
     if ctx is not None:
         turns = openai_live_phone.transcript_turns(deltas)
         reply_gaps = openai_live_phone.reply_gaps_ms(turns)
-        audible_gaps = await asyncio.to_thread(recording.audible_reply_gaps_ms, ctx.played_end) if recording else []
+        timings = await asyncio.to_thread(recording.audible_reply_timings_ms, ctx.played_end) if recording else []
         logger.info(
-            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s audible_reply_gaps_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
+            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s audible_reply_timings_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
             call_id, prepared.ai_role, prepared.codec, ctx.first_model_audio_ms, ctx.first_output_ms, reply_gaps[-10:],
-            audible_gaps[-10:], ctx.delegations,
+            timings[-10:], ctx.delegations,
             ctx.max_queue_frames, ctx.max_mark_delay_ms, finalized,
         )
     if recording is not None and ctx is not None:

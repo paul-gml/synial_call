@@ -58,14 +58,17 @@ class CallRecording:
     def __init__(self, max_seconds):
         self.limit = int(max_seconds * RATE)
         self.channels = {"user": [], "assistant": []}
+        self.output_arrivals = {}
         self.truncated = False
 
-    def add(self, role, start_sample, ulaw):
+    def add(self, role, start_sample, ulaw, *, received_sample=None):
         remaining = self.limit - start_sample
         if len(ulaw) > remaining:
             self.truncated = True
         if remaining > 0 and ulaw:
             self.channels[role].append((start_sample, ulaw[:remaining]))
+            if role == "assistant" and received_sample is not None:
+                self.output_arrivals[start_sample] = received_sample
 
     def audible_roles(self, end_sample):
         return {
@@ -74,7 +77,7 @@ class CallRecording:
                    for start, frame in frames)
         }
 
-    def audible_reply_gaps_ms(self, played_end):
+    def audible_reply_timings_ms(self, played_end):
         """Estimate the gaps from audible bursts, independently of transcript timestamps."""
         def bursts(role, limit):
             active = []
@@ -107,7 +110,12 @@ class CallRecording:
                 index += 1
             user_overlaps = index < len(user) and user[index][0] < start
             if last_user_end > previous_reply_end and not user_overlaps:
-                gaps.append((start - last_user_end) * 1000 // RATE)
+                arrival = self.output_arrivals.get(start)
+                gaps.append({
+                    "gap": (start - last_user_end) * 1000 // RATE,
+                    "before_audio_arrival": (arrival - last_user_end) * 1000 // RATE if arrival is not None else None,
+                    "relay": (start - arrival) * 1000 // RATE if arrival is not None else None,
+                })
             previous_reply_end = end
         return gaps
 

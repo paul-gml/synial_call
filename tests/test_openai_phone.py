@@ -165,12 +165,15 @@ def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_sh
     config = live.phone_session("journaliste", "admin", "Direction", "Dossier hors partie", briefing=data)
     context = config["input"][0]["content"][0]["text"]
     assert "Sarah Lenoir" in config["instructions"]
-    assert "prends la parole" in config["instructions"]
+    assert "Garde le même rythme de réponse" in config["instructions"]
+    assert "accélère la relance" in config["instructions"]
     assert "d'envoyer les gendarmes" in context and "exécution à confirmer" in context
     assert "Le portail a été ouvert à 14 h 15." in context
     assert "14 h · Marc → Sarah Lenoir : Le portail nord était fermé." in context
     assert not any(value in context for value in ("Dossier hors partie", "Informations futures confidentielles"))
     assert len(context) < 3800
+    inbound = live.phone_session("journaliste", "inbound", "Direction", "", briefing=data)
+    assert "Garde le même rythme de réponse" not in inbound["instructions"]
 
 
 def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_audio():
@@ -178,7 +181,8 @@ def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_
     voice = b"\xb1" * 160
     def speech(role, start_ms, duration_ms):
         for t in range(start_ms, start_ms + duration_ms, 20):
-            recording.add(role, t * 8, voice)
+            received = (t - 20) * 8 if role == "assistant" else None
+            recording.add(role, t * 8, voice, received_sample=received)
     speech("assistant", 100, 400)
     speech("user", 1000, 1000)
     speech("assistant", 7000, 600)
@@ -186,7 +190,10 @@ def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_
     speech("assistant", 8900, 300)
     speech("user", 10000, 400)
     speech("assistant", 10600, 300)
-    assert recording.audible_reply_gaps_ms(9200 * 8) == [5000, 500]
+    assert recording.audible_reply_timings_ms(9200 * 8) == [
+        {"gap": 5000, "before_audio_arrival": 4980, "relay": 20},
+        {"gap": 500, "before_audio_arrival": 480, "relay": 20},
+    ]
 
 
 @pytest.mark.parametrize("codec", ["pcm", "pcmu"])
@@ -366,7 +373,7 @@ def test_phone_audio_burst_stays_in_order_with_bounded_playback_lead(voice_setti
         ctx = service.StreamContext(stream_sid='MZ-test', call_sid='CA-test', started_at=100)
         frames = [bytes([index]) * 160 for index in range(8)]
         for frame in frames:
-            queue.put_nowait(frame)
+            queue.put_nowait((frame, 0))
 
         async def send(message):
             if message['event'] == 'media':
