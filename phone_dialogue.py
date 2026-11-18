@@ -240,7 +240,8 @@ def format_managed_briefing(briefing):
 
 
 PROFESSIONAL_JUDGMENT = (
-    "Juge la demande selon ton mandat, les moyens attestés et le temps nécessaire. Accepte ce qui tient. "
+    "Appuie-toi sur tes connaissances professionnelles et générales pour évaluer la demande, les délais et les contraintes. "
+    "Accepte ce qui tient dans ton mandat. Toute capacité ou disponibilité non attestée dans l'exercice reste à vérifier. "
     "Si une ressource ou un accord manque, dis franchement ce qui bloque et, si possible, ce qu'on peut faire à la place. "
     "Une demande, une intention ou un accord ne prouve jamais qu'une action a été exécutée. "
     "Si le joueur creuse une piste, livre le détail pertinent que tu connais, avec sa provenance et son degré de certitude. "

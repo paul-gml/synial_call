@@ -219,6 +219,8 @@ def summarize(client, model, payload):
                 "Résume en français cet appel fictif de gestion de crise en utilisant les champs du schéma. "
                 "Le contexte et l'objectif doivent être déduits des paroles effectivement échangées. "
                 "Attribue les décisions et engagements à leur auteur, avec échéance seulement si mentionnée. "
+                "Distingue demande, accord de principe et exécution rapportée. "
+                "Précise si un propos est explicitement confidentiel, publiable ou déjà rendu public selon la transcription. "
                 "Distingue faits rapportés, informations corroborées dans l'appel et hypothèses nouvelles. "
                 "Dans new_hypotheses, indique explicitement qui émet chaque hypothèse et qu'elle reste à vérifier. "
                 "Décris la dynamique relationnelle observable dans les propos, sans inférer d'émotion non étayée. "

@@ -1520,6 +1520,7 @@ async def enqueue_phone_record(postcall, prepared, ctx, recording, deltas, final
     if getattr(prepared, "run_id", ""):
         payload.update(run_id=prepared.run_id, player_id=prepared.player_id,
                        scenario_time=prepared.scenario_time, direction="in" if prepared.initiated_by == "inbound" else "out",
+                       finished_at=time.time() - (time.monotonic() - ctx.ended_at),
                        partial=fallback or not finalized)
     if fallback and recording.truncated:
         payload["transcript_recording_truncated"] = True
