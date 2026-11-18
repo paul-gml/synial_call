@@ -102,8 +102,10 @@ ENABLE_TRANSCRIPTIONS = os.getenv("ENABLE_TRANSCRIPTIONS", "true").lower() in ("
 OPENAI_PHONE_CODEC = os.getenv("OPENAI_PHONE_CODEC", openai_live_phone.DEFAULT_CODEC).strip().lower()
 TWILIO_RATE_HZ = 8000
 TWILIO_FRAME_BYTES = 160  # 20 ms
-OUT_QUEUE_MAX_FRAMES = max(5, int(os.getenv("OUT_QUEUE_MAX_FRAMES", "25")))
 OPENAI_PHONE_PLAYBACK_LEAD_SECONDS = min(.2, max(.02, int(os.getenv("OPENAI_PHONE_PLAYBACK_LEAD_MS", "60")) / 1000))
+# A burst from Live must fit without pausing socket reads. Twilio is still paced by the playback lead.
+MAX_PENDING_PHONE_FRAMES = 30 * TWILIO_RATE_HZ // TWILIO_FRAME_BYTES
+PHONE_DIGITAL_PAUSE_SAMPLES = TWILIO_RATE_HZ * 120 // 1000
 OPENAI_PHONE_CLOSE_TIMEOUT = 15
 VOICE_RECORD_MAX_SECONDS = max(1, int(os.getenv("VOICE_RECORD_MAX_SECONDS", "1800")))
 VOICE_POSTCALL_DIR = Path(os.getenv("VOICE_POSTCALL_DIR") or Path.home() / ".synial-phone-postcall")
@@ -470,6 +472,8 @@ class StreamContext:
     ended_at: float = 0.0
     optional_events: set = field(default_factory=set)
     delegations: int = 0
+    consecutive_silent_samples: int = 0
+    skipped_silence_samples: int = 0
 
     def position(self):
         return max(0, round((time.monotonic() - self.started_at) * TWILIO_RATE_HZ))
@@ -477,6 +481,7 @@ class StreamContext:
 
 async def openai_phone_receiver_loop(session, converter, queue, deltas, stopping, ctx):
     async for raw in session:
+        received = ctx.position()
         event = json.loads(raw)
         kind = event.get("type")
         if kind == "session.closed":
@@ -493,14 +498,25 @@ async def openai_phone_receiver_loop(session, converter, queue, deltas, stopping
                 role = "user" if kind == "session.input_transcript.delta" else "assistant"
                 deltas.append((role, event))
         elif kind == "session.output_audio.delta" and not stopping.is_set():
-            received = ctx.position()
             for frame in converter.to_twilio(base64.b64decode(event["delta"], validate=True)):
                 if ctx.first_model_audio_ms is None:
-                    ctx.first_model_audio_ms = ctx.position() * 1000 // TWILIO_RATE_HZ
-                if stopping.is_set():
+                    ctx.first_model_audio_ms = received * 1000 // TWILIO_RATE_HZ
+                # Both μ-law zero codewords decode to exact digital silence. Keep breaths and other low-level audio.
+                if not frame.strip(b"\xff\x7f"):
+                    keep = min(len(frame), PHONE_DIGITAL_PAUSE_SAMPLES - ctx.consecutive_silent_samples)
+                    ctx.consecutive_silent_samples += keep
+                    ctx.skipped_silence_samples += len(frame) - keep
+                    if not keep:
+                        continue
+                    frame = frame[:keep]
+                else:
+                    ctx.consecutive_silent_samples = 0
+                try:
+                    # Timestamp the socket read rather than waiting for the previous audio to play.
+                    queue.put_nowait((frame, received))
+                except asyncio.QueueFull:
                     ctx.playback_uncertain = True
-                    break
-                await asyncio.wait_for(queue.put((frame, received)), timeout=1)
+                    raise BufferError("Phone audio backlog exceeded the safety limit") from None
                 ctx.max_queue_frames = max(ctx.max_queue_frames, queue.qsize())
         elif kind == "session.delegation.created" and not stopping.is_set():
             delegation = event.get("delegation") or {}
@@ -1357,7 +1373,7 @@ async def twilio_stream(websocket: WebSocket):
     prepared = None
     ctx = None
     recording = None
-    queue = asyncio.Queue(maxsize=OUT_QUEUE_MAX_FRAMES)
+    queue = asyncio.Queue(maxsize=MAX_PENDING_PHONE_FRAMES)
     stopping = asyncio.Event()
     deltas = []
     io_tasks = []
@@ -1467,9 +1483,9 @@ async def finish_phone_call(postcall, prepared, ctx, recording, deltas, queue, i
         reply_gaps = openai_live_phone.reply_gaps_ms(turns)
         timings = await asyncio.to_thread(recording.audible_reply_timings_ms, ctx.played_end) if recording else []
         logger.info(
-            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s audible_reply_timings_ms=%s delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
+            "[%s] phone ended role=%s codec=%s first_model_audio_ms=%s first_audio_ms=%s reply_gaps_ms=%s audible_reply_timings_ms=%s trimmed_digital_silence_ms=%d delegations=%d max_queue_frames=%s max_mark_delay_ms=%s finalized=%s",
             call_id, prepared.ai_role, prepared.codec, ctx.first_model_audio_ms, ctx.first_output_ms, reply_gaps[-10:],
-            timings[-10:], ctx.delegations,
+            timings[-10:], ctx.skipped_silence_samples * 1000 // TWILIO_RATE_HZ, ctx.delegations,
             ctx.max_queue_frames, ctx.max_mark_delay_ms, finalized,
         )
     if recording is not None and ctx is not None:

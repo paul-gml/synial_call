@@ -196,6 +196,50 @@ def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_
     ]
 
 
+def test_burst_of_digital_silence_cannot_hold_the_next_voice_packet(voice_settings):
+    service = voice_settings
+    pause = b"\xff\x7f" * (4400 * 4)
+    speech = b"\xb1" * 1600
+    low_level_audio = b"\xfe" * 160
+
+    async def packets():
+        for chunk in (pause, pause, speech, low_level_audio):
+            yield json.dumps({"type": "session.output_audio.delta", "delta": base64.b64encode(chunk).decode()})
+        yield json.dumps({"type": "session.closed"})
+
+    async def exercise():
+        ctx = service.StreamContext("stream", "call")
+        queue = asyncio.Queue(maxsize=service.MAX_PENDING_PHONE_FRAMES)
+        assert await asyncio.wait_for(service.openai_phone_receiver_loop(
+            packets(), service.AudioConverter("pcmu"), queue, [], asyncio.Event(), ctx,
+        ), timeout=.5)
+        # No Twilio consumer is running. A bounded, paced reader would stall on the first silence packet.
+        assert ctx.skipped_silence_samples == 69440
+        items = [queue.get_nowait() for _ in range(queue.qsize())]
+        kept = b"".join(frame for frame, _ in items)
+        assert kept == pause[:960] + speech + low_level_audio
+        assert all(timestamp < 4000 for _, timestamp in items)
+
+    asyncio.run(exercise())
+
+
+def test_full_playback_buffer_reports_an_overflow_instead_of_waiting_on_twilio(voice_settings):
+    service = voice_settings
+
+    async def packets():
+        yield json.dumps({"type": "session.output_audio.delta", "delta": base64.b64encode(b"\xb1" * 320).decode()})
+
+    async def exercise():
+        ctx = service.StreamContext("stream", "call")
+        with pytest.raises(BufferError):
+            await asyncio.wait_for(service.openai_phone_receiver_loop(
+                packets(), service.AudioConverter("pcmu"), asyncio.Queue(maxsize=1), [], asyncio.Event(), ctx,
+            ), timeout=.5)
+        assert ctx.playback_uncertain
+
+    asyncio.run(exercise())
+
+
 @pytest.mark.parametrize("codec", ["pcm", "pcmu"])
 def test_outbound_call_bridges_openai_audio_and_posts_transcript(voice_settings, monkeypatch, codec):
     service = voice_settings

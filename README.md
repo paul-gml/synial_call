@@ -14,7 +14,6 @@ GPT-Live-1 incarne les trois personnages au téléphone. Twilio compose le numé
 | `OPENAI_PHONE_VOICE_COLONEL_POMPIERS` | `sillage`. |
 | `OPENAI_PHONE_CODEC` | `pcmu` par défaut. Transmet les octets G.711 μ-law 8 kHz dans les deux sens. Pour revenir au PCM 24 kHz côté OpenAI, définir `pcm` et redémarrer le service. |
 | `OPENAI_PHONE_PLAYBACK_LEAD_MS` | `60`, borné entre 20 et 200 ms. C’est l’avance de lecture visée côté Twilio. |
-| `OUT_QUEUE_MAX_FRAMES` | `25`, environ 500 ms à 20 ms par trame. La file applique une contre-pression. Une saturation durable ou un envoi bloqué termine proprement l’appel et active le traitement de secours si des paroles ont été capturées. |
 | `ENABLE_TRANSCRIPTIONS` | `true`. Avec `false`, le service désactive la collecte, la transcription et le résumé des nouveaux appels. |
 | `TRANSCRIBE_MODEL` | `gemini-3.8-flash` pour la transcription de secours et le résumé. Vérifier qu’une ancienne valeur explicite a été retirée. |
 | `GEMINI_API_KEY` ou `GOOGLE_API_KEY` | Clé du service Gemini. Pour Vertex, renseigner `GOOGLE_CLOUD_PROJECT` ou `GCP_PROJECT` et les identifiants Google. |
@@ -40,6 +39,8 @@ Les travaux persistent dans `calls.sqlite3` jusqu’à confirmation de Flask pou
 1. Déployer l’application Flask principale en premier. Elle crée la table des reçus via son initialisation habituelle et confirme le stockage du résumé et de la transcription.
 2. Déployer le service vocal avec `pcmu`. Sur une instance de test autorisée, déclencher un appel depuis chaque interface et vérifier le personnage, le contexte et la présence du résumé et des tours dans le journal.
 3. Pour comparer les codecs, répéter le même dialogue en `pcm`. Comparer la première réplique, les fins de phrases, les silences, les acquiescements courts, une correction explicite, le timbre et le délai de lecture. Tester `marin` indépendamment du changement de codec.
+
+Le relais lit les paquets GPT-Live sans attendre leur lecture par Twilio. Il conserve jusqu’à 120 ms par plage de silence numérique pur en sortie. Les trames contenant du son et le flux entrant restent intacts. La file de sortie est bornée à 30 secondes de trames de 20 ms. En cas de saturation, le service signale l’interruption et conserve la capture de la conversation pour le traitement de secours. `trimmed_digital_silence_ms` indique le silence numérique retiré. Dans `audible_reply_timings_ms`, `before_audio_arrival` se termine à la lecture du paquet par le relais et `relay` mesure le temps entre cette lecture et le début de la diffusion vers Twilio.
 
 Les tests locaux simulent OpenAI, Gemini et Twilio. Ils vérifient la chaîne logicielle. La qualité sonore, l’expressivité en français, le comportement réel des interruptions et les droits de projet se vérifient sur un appel autorisé.
 
