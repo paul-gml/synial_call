@@ -32,7 +32,7 @@ class FakeLiveSocket:
         self.sent.append(event)
         kind = event['type']
         if kind == 'session.start':
-            await self.put('session.started')
+            await self.put('session.started', session={'audio': event['session']['audio']})
         elif kind == 'session.input_audio.append':
             if sum(sent["type"] == kind for sent in self.sent) == 1:
                 await self.put('session.output_audio.delta', delta=base64.b64encode(self.output).decode())
@@ -165,7 +165,8 @@ def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_sh
     config = live.phone_session("journaliste", "admin", "Direction", "Dossier hors partie", briefing=data)
     context = config["input"][0]["content"][0]["text"]
     assert "Sarah Lenoir" in config["instructions"]
-    assert "Garde le même rythme de réponse" in config["instructions"]
+    assert "ton intérêt s'entend dès la première question" in config["instructions"]
+    assert "Garde le même timbre" in config["instructions"]
     assert "accélère la relance" in config["instructions"]
     assert "d'envoyer les gendarmes" in context and "exécution à confirmer" in context
     assert "Le portail a été ouvert à 14 h 15." in context
@@ -173,7 +174,8 @@ def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_sh
     assert not any(value in context for value in ("Dossier hors partie", "Informations futures confidentielles"))
     assert len(context) < 3800
     inbound = live.phone_session("journaliste", "inbound", "Direction", "", briefing=data)
-    assert "Garde le même rythme de réponse" not in inbound["instructions"]
+    assert "ton intérêt s'entend dès la première question" not in inbound["instructions"]
+    assert "Garde le même timbre" in inbound["instructions"]
 
 
 def test_call_audio_measures_reply_gap_without_transcripts_and_ignores_unplayed_audio():
@@ -401,6 +403,51 @@ def test_provider_rejection_closes_socket_without_dialling(voice_settings, monke
     assert response.status_code == 502
     assert 'private upstream details' not in response.text
     assert upstream.closed and not service.PREPARED
+
+
+@pytest.mark.parametrize("confirmed_format", [
+    {"type": "audio/pcmu", "rate": 8000},
+    {"type": "audio/pcm", "rate": 16000},
+])
+def test_incompatible_startup_audio_is_rejected_before_dialling(voice_settings, monkeypatch, confirmed_format):
+    service = voice_settings
+
+    class MismatchedSocket(FakeLiveSocket):
+        async def send(self, _raw):
+            await self.put("session.started", session={"audio": {"format": confirmed_format}})
+
+    upstream = MismatchedSocket()
+    monkeypatch.setattr(live.websockets, "connect", lambda *_args, **_kwargs: upstream)
+    monkeypatch.setattr(service, "_twilio_client", lambda: pytest.fail("No call expected"))
+    with TestClient(service.app) as client:
+        response = client.post("/api/prepare_call", headers={"X-API-Key": "test-admin"},
+                               json={"to": "+33655550101"})
+    assert response.status_code == 502
+    assert upstream.closed and not service.PREPARED
+
+
+@pytest.mark.parametrize("codec", ["pcmu", "pcm"])
+def test_audio_packet_boundaries_preserve_pitch_and_duration(voice_settings, codec):
+    import math
+    import struct
+
+    service = voice_settings
+    sample_rate = live.AUDIO_FORMATS[codec]["rate"]
+    tone_hz = 220
+    pcm = b"".join(struct.pack("<h", round(10000 * math.sin(2 * math.pi * tone_hz * n / sample_rate)))
+                   for n in range(sample_rate))
+    audio = service.audioop.lin2ulaw(pcm, 2) if codec == "pcmu" else pcm
+    converter = service.AudioConverter(codec)
+    packet_size = 407  # The PCM case carries an incomplete sample between packets.
+    delivered = b"".join(frame for start in range(0, len(audio), packet_size)
+                         for frame in converter.to_twilio(audio[start:start + packet_size]))
+    if codec == "pcmu":
+        assert delivered == audio
+    assert len(delivered) == service.TWILIO_RATE_HZ
+    decoded = service.audioop.ulaw2lin(delivered, 2)
+    samples = struct.unpack(f"<{service.TWILIO_RATE_HZ}h", decoded)
+    crossings = sum(previous <= 0 < current for previous, current in zip(samples, samples[1:]))
+    assert crossings == tone_hz
 
 
 def test_phone_audio_burst_stays_in_order_with_bounded_playback_lead(voice_settings, monkeypatch):

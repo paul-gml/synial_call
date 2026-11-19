@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import logging
 import os
 from bisect import bisect_left
 from contextlib import asynccontextmanager
@@ -16,6 +17,7 @@ MODEL = os.getenv("OPENAI_PHONE_MODEL", "").strip() or "gpt-live-1"
 RATE = 24000
 URL = "wss://api.openai.com/v1/live/sessions"
 DEFAULT_CODEC = "pcmu"
+logger = logging.getLogger(__name__)
 
 
 AUDIO_FORMATS = {
@@ -57,6 +59,23 @@ async def connect(api_key, config):
         first = json.loads(await asyncio.wait_for(upstream.recv(), timeout=10))
         if first.get("type") != "session.started":
             raise RuntimeError("GPT-Live did not confirm the session")
+        audio = (first.get("session") or {}).get("audio") or {}
+        expected_format = config["audio"]["format"]
+        confirmed_format = audio.get("format") or {}
+        if any(confirmed_format.get(key, value) != value for key, value in expected_format.items()):
+            logger.error("GPT-Live audio format mismatch: expected %s at %s Hz, received %s at %s Hz",
+                         expected_format["type"], expected_format["rate"],
+                         confirmed_format.get("type"), confirmed_format.get("rate"))
+            raise RuntimeError("GPT-Live confirmed an incompatible phone audio format")
+
+        requested_voice = config["audio"]["output"]["voice"]
+        confirmed_voice = (audio.get("output") or {}).get("voice")
+        if isinstance(requested_voice, dict):
+            requested_voice = requested_voice.get("id")
+        if isinstance(confirmed_voice, dict):
+            confirmed_voice = confirmed_voice.get("id")
+        if confirmed_voice is not None and confirmed_voice != requested_voice:
+            logger.warning("GPT-Live confirmed a different voice at phone session startup")
         yield upstream
 
 

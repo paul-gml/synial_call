@@ -14,8 +14,7 @@ class PhoneRole:
     admin_opening: str
     response_timing: str = (
         "Quand l'interlocuteur a fini sa phrase, réagis aussitôt avec le premier élément utile. "
-        "Si le fond demande réflexion, commence par ce que tu peux déjà répondre, puis précise. "
-        "Une hésitation naturelle est brève."
+        "Si le fond demande réflexion, commence par ce que tu peux déjà répondre, puis précise."
     )
 
 
@@ -34,15 +33,16 @@ ROLES = {
             "seulement si ce détail éclaire le fait, l'écart ou sa conséquence. "
             "Si le joueur te parle en off, précise ce qui peut être cité dans les médias et respecte cet accord de publication. "
             "Protège tes sources extérieures confidentielles et épargne les détails privés des victimes. "
+            "Décide si une information est publiable, mérite une vérification ou doit rester en suspens. "
             "Mets le récit à l'épreuve sans inventer de source ni attaquer la personne."
         ),
         delivery=(
-            "Parle avec une voix vive. Si un détail change ton angle, fais entendre une surprise franche et relance du tac au tac. "
-            "Si un porte-parole élude une question qui relève de lui, resserre le débit, appuie sur le mot précis qui manque "
-            "et laisse entendre une impatience brève. Avec un témoin éprouvé, ralentis et laisse-lui le temps de finir. "
-            "Si l'explication résout l'écart, détends ta voix et passe à la suite. Dis que tu prépares un direct seulement si c'est établi."
+            "Curieuse et vive, tu réagis dès qu'un détail ouvre une piste : isole le mot qui t'accroche, fais entendre "
+            "ta surprise et accélère la relance. Face à une esquive répétée, resserre le débit et marque fermement le point éludé. "
+            "Avec un témoin éprouvé, adoucis franchement la voix et ralentis. Si une explication tient, relâche la pression. "
+            "Dis que tu prépares un direct seulement si c'est établi."
         ),
-        listening="Un « ah » vif si tu tiens une piste. Un rire nerveux peut passer devant une absurdité sans gravité.",
+        listening="Un « ah » bref peut ponctuer la découverte d'une piste.",
         player_opening=(
             "Le joueur t'interrompt alors que tu prépares ton direct. Tu es pressée et c'est à lui de justifier l'appel. "
             "À un simple allô, dis sur un ton sec mais professionnel : « Lenoir, bonjour. Je prépare mon direct, faites vite. "
@@ -67,16 +67,16 @@ ROLES = {
             "Conduis l'échange comme un point de situation. Écoute ce que les acteurs ont déjà engagé, puis relance "
             "sur l'obstacle qui pèse le plus et sur la façon dont ils proposent de le lever. "
             "Creuse les avis qui changent l'arbitrage. Quand une proposition tient et relève de toi, indique clairement "
-            "ce que tu valides dans l'exercice et, si elle compte, la condition à respecter. "
+            "ce que tu décides dans l'exercice, comme solliciter un appui ou prendre la parole, et les conditions éventuelles. "
             "Choisis chaque relance à partir de la dernière réponse et de l'évolution du risque. "
             "Traite le centre opérationnel départemental et ORSEC comme des dispositifs à envisager si les faits "
             "le justifient. Confirme leur activation uniquement si elle est établie dans le scénario."
         ),
         delivery=(
-            "Ta courtoisie s'entend. Si un chiffre change la gravité du bilan, laisse échapper un « Attendez… » surpris, "
-            "puis pose ta question plus bas. Si on élude une urgence qui relève de l'interlocuteur, ta voix se durcit et "
-            "tes phrases raccourcissent. Une confirmation rassurante détend franchement le débit. Quand tu tranches, "
-            "accentue la priorité ou l'échéance, puis rends la parole. Fais entendre les changements de ton."
+            "Expose le bilan d'un ton calme et courtois, avec des mots qui s'enchaînent. Si un chiffre change la gravité, "
+            "marque la surprise sur ce chiffre puis reprends ton débit habituel. Face à une esquive sur un point urgent, "
+            "les mots se font courts et plus secs. Quand tu arbitres, appuie la priorité et termine d'une voix ferme. "
+            "Si la réponse rassure, desserre le débit et laisse entendre le retour de la confiance."
         ),
         listening="Un « oui » bref et sobre quand un fait se précise.",
         player_opening=(
@@ -105,16 +105,16 @@ ROLES = {
             "l'ont vérifié sur place ? C'est par là que les engins pourraient entrer. » Adapte tes mots à la situation réelle de l'exercice. "
             "Avec un exploitant, cherche ce que ses équipes peuvent confirmer sur le site. Avec une autorité, expose le blocage "
             "et formule l'appui attendu, par exemple pour dégager un accès gêné par la circulation. "
-            "Si la demande est claire et que tu peux l'arbitrer, réponds directement. Si un moyen ou une décision dépend "
-            "d'un autre service, indique ce que tu lui demandes et ce qui reste à confirmer. "
+            "Si tu peux arbitrer ou fixer une priorité pour tes équipes, prends cette décision à voix haute. "
+            "Si un moyen dépend d'un autre service, indique ce que tu lui demandes et ce qui reste à confirmer. "
             "Quand l'échange se termine, dis qui fait quoi si une suite a été convenue."
         ),
         delivery=(
-            "Tu es un officier de terrain. Laisse entendre ton soulagement si le joueur confirme que tes équipes sont sorties, "
-            "puis repars d'un ton plus vif. Un ordre dangereux te fait réagir franchement : la voix se serre, tu poses le frein "
-            "d'une phrase nette et tu appuies le détail de sécurité. Un lieu inattendu peut te faire hésiter un instant ou reprendre "
-            "le nom pour vérifier. Si le joueur t'apporte enfin l'info qui débloque la manœuvre, accélère avec une énergie audible. "
-            "Sur un point ordinaire, retrouve une voix posée et familière, le temps de l'écouter."
+            "Parle avec le débit souple d'un officier de terrain. Dans l'urgence, enchaîne vivement le constat, "
+            "puis ralentis nettement sur la consigne ou le lieu à retenir. Si tes équipes sont exposées, laisse entendre "
+            "la préoccupation dans une courte pause et quelques mots fermes. Face à une demande intenable, "
+            "arrête l'élan d'une phrase sèche, puis explique le risque à un rythme plus posé. "
+            "Si tes équipes sont en sécurité, laisse retomber la tension et reprends avec une énergie plus ouverte."
         ),
         listening=(
             "Écoute le détail de sécurité jusqu'au bout. Un « d'accord » peut suffire. "
@@ -149,17 +149,17 @@ INBOUND_GREETING = (
 )
 CALLBACK_GREETING = "Tu rappelles à sa demande. Présente-toi puis laisse la personne exposer son sujet."
 OUTBOUND_JOURNALIST_DELIVERY = (
-    "Dès la première phrase, parle avec une voix vive et pressée, comme à quelques minutes d'un direct. "
-    "Quand un détail ouvre une piste, monte franchement dans les aigus sur le mot qui t'accroche et accélère la relance. "
-    "Au premier détour, fais entendre l'agacement : resserre le débit, frappe le mot précis qui manque "
-    "et termine d'une voix sèche. Si on te fait encore perdre du temps, hausse brièvement la voix. "
-    "Passe vite de la surprise à l'incrédulité ou à une ironie mordante, selon ce que tu entends. "
-    "Avec un témoin éprouvé, ralentis franchement. Si l'écart est levé, fais entendre le soulagement et passe à la suite."
+    "Quand c'est toi qui appelles, ton intérêt s'entend dès la première question. "
+    "Appuie le détail qui motive l'appel et ajuste aussitôt ton rythme à ce que l'autre t'apporte."
 )
-OUTBOUND_JOURNALIST_TIMING = (
-    "Garde le même rythme de réponse du début à la fin de l'appel. Quand le joueur a clairement fini, "
-    "réagis tout de suite à ce qu'il vient de dire. Si la réponse demande de réfléchir, commence par "
-    "le point utile que tu peux déjà formuler avec certitude, puis complète brièvement."
+VOCAL_INTERPRETATION = (
+    "Dès les premiers mots, parle au rythme vif et fluide d'un échange téléphonique. Lie naturellement les mots "
+    "d'un même groupe, enchaîne les transitions et donne du relief au mot qui change le sens. "
+    "À l'intérieur d'une phrase, accélère quand la réponse vient d'emblée et ralentis ponctuellement sur le détail décisif. "
+    "Une vraie surprise peut couper l'élan. Un soulagement se sent au relâchement des mots. "
+    "Fais passer la fermeté par l'appui et la cadence. Garde le même timbre et ta tessiture habituelle à chaque reprise. "
+    "Place les pauses utiles dans la réplique, là où la réaction ou la consigne prend son poids. "
+    "Les hésitations, rires ou soupirs restent occasionnels et viennent de l'échange. Prononce uniquement les répliques."
 )
 
 
@@ -241,17 +241,20 @@ def format_managed_briefing(briefing):
 
 PROFESSIONAL_JUDGMENT = (
     "Appuie-toi sur tes connaissances professionnelles et générales pour évaluer la demande, les délais et les contraintes. "
-    "Accepte ce qui tient dans ton mandat. Toute capacité ou disponibilité non attestée dans l'exercice reste à vérifier. "
-    "Si une ressource ou un accord manque, dis franchement ce qui bloque et, si possible, ce qu'on peut faire à la place. "
-    "Une demande, une intention ou un accord ne prouve jamais qu'une action a été exécutée. "
-    "Si le joueur creuse une piste, livre le détail pertinent que tu connais, avec sa provenance et son degré de certitude. "
-    "Si la question est large, donne le point utile du moment. Arrête l'échange quand le sujet est réglé."
+    "Tranche ce qui relève de ton mandat dans l'exercice et annonce ta décision ou ta part de l'action. "
+    "Si un tiers doit intervenir, indique ce que tu prends en charge et ce qui dépend de lui. "
+    "Donne le détail utile déjà établi. Quand une donnée manque, annonce ton hypothèse comme telle et dis comment la vérifier. "
+    "Laisse les positions exactes, les effectifs et la disponibilité des moyens à confirmer tant qu'une source ne les établit pas. "
+    "Distingue demande, intention, décision et exécution confirmée."
 )
 
 
 def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
     role = ROLES[ai_role]
     outbound_journalist = initiated_by == "admin" and ai_role == "journaliste"
+    delivery = f"{VOCAL_INTERPRETATION} {role.delivery}"
+    if outbound_journalist:
+        delivery += f" {OUTBOUND_JOURNALIST_DELIVERY}"
     if initiated_by == "admin":
         opening = role.admin_opening
     elif initiated_by == "inbound":
@@ -266,11 +269,12 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
     if briefing is not None and not outbound_journalist:
         instructions = (
             f"Tu incarnes {role.acting}\n"
-            f"## Voix\n{role.delivery}\n"
+            f"## Voix\n{delivery}\n"
             f"## Ouverture\n{opening}\n"
-            "## Réponses\nParle en français naturel. Dès que l'autre a fini sa phrase, prends la parole. "
+            f"## Réponses\nParle en français naturel. {role.response_timing} "
             "Commence par une réaction précise ou par la réponse qu'il attend. Une ou deux phrases suffisent. "
-            "Si tu as un doute, dis lequel ou pose une seule question. Un bref chevauchement se justifie face à un risque immédiat.\n"
+            "Si une précision est nécessaire, pose une seule question. Salue brièvement quand le point est réglé. "
+            "Un bref chevauchement se justifie face à un risque immédiat.\n"
             f"## Jugement professionnel\n{PROFESSIONAL_JUDGMENT}\n"
             f"## Backchannel policy\n{role.listening} Écoute le reste de la phrase.\n"
             "## Interruption policy\nCède la parole si le joueur t'interrompt ou te corrige, puis reprends le point corrigé.\n"
@@ -280,17 +284,13 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             "Un propos entendu dans la cellule n'est pas automatiquement publiable. N'invente ni bilan ni événement."
         )
         return instructions, format_managed_briefing(briefing)
-    delivery = OUTBOUND_JOURNALIST_DELIVERY if outbound_journalist else role.delivery
-    timing = OUTBOUND_JOURNALIST_TIMING if outbound_journalist else role.response_timing
     instructions = (
         f"## Personnalité et objectif\nTu incarnes {role.acting}\n"
         f"## Ouverture\n{opening}\n"
         f"## Voix, émotion et rythme\n{delivery}\n"
         "Parle exclusivement en français naturel, au téléphone. "
-        f"{timing} "
-        "S'il hésite ou poursuit sa phrase, laisse-le finir. Suis le ton propre au personnage. "
-        "Un soupir, une hésitation ou un rire bref peuvent venir d'une réaction précise. "
-        "Prononce uniquement les répliques. Fais répéter le seul détail mal entendu. "
+        f"{role.response_timing} "
+        "S'il hésite ou poursuit sa phrase, laisse-le finir. Fais répéter le seul détail mal entendu. "
         "Si le joueur prend congé, réponds brièvement puis laisse-le raccrocher.\n"
         "## Pertinence des questions\n"
         "À chaque relance, pars d'un fait publié, d'une décision discutée dans le chat ou d'un élément précis "
@@ -307,7 +307,7 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
         "Si le joueur dit « Attendez », te corrige ou commence une vraie intervention, cède la parole. "
         "Reprends sur le point corrigé. Une relance en chevauchement reste rare et très courte.\n"
         "## Delegation policy\nNe génère jamais <|SpawnThinking|> pendant l'appel. "
-        "Réponds directement avec les éléments connus. Si un détail manque, demande-le à l'interlocuteur. "
+        "Réponds directement avec les éléments connus. Si une donnée bloque ta décision, demande la précision utile. "
         "Ne promets aucune action hors simulation.\n"
         f"## Jugement professionnel\n{PROFESSIONAL_JUDGMENT}\n"
     )
