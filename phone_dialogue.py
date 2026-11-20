@@ -182,7 +182,7 @@ def _attributed(value, text, limit):
 
 
 def format_managed_briefing(briefing):
-    """Choose a few attributable facts for spontaneous speech; keep full records in SYNIAL."""
+    """Keep the played crisis journal complete and limit excerpts of private exchanges."""
     lines = ["Repères de simulation. Les propos ci-dessous sont rapportés."]
 
     def section(title, items):
@@ -202,15 +202,22 @@ def format_managed_briefing(briefing):
         _excerpt(briefing.get("informations_communicables_de_ce_personnage"), 550),
     ))
     journal = briefing.get("journal_de_la_cellule")
-    journal = journal if isinstance(journal, dict) else {}
-    section("Derniers événements publiés", (
-        " · ".join(filter(None, (_excerpt(row.get("heure_fictive"), 55),
-                                  _excerpt(row.get("source"), 55), _excerpt(row.get("extrait"), 180))))
-        for row in _records(journal.get("événements_et_conséquences_publiés"))[-7:]
-    ))
-    decisions = journal.get("décisions_soumises_par_la_cellule")
-    if isinstance(decisions, list):
-        section("Décisions annoncées par la cellule, exécution à confirmer", (_excerpt(row, 150) for row in decisions[-7:]))
+    if isinstance(journal, dict):
+        # Accept briefings from the previous website version during a rolling deploy.
+        journal = [
+            *({"type": "décision annoncée", "texte": text}
+              for text in journal.get("décisions_soumises_par_la_cellule", [])),
+            *({**row, "type": "événement publié", "texte": row.get("extrait")}
+              for row in _records(journal.get("événements_et_conséquences_publiés"))),
+        ]
+    journal_lines = [
+        " · ".join(filter(None, (row.get("heure"), row.get("heure_fictive"), row.get("type"),
+                                row.get("source"), row["texte"])))
+        for row in _records(journal) if row.get("texte")
+    ]
+    if journal_lines:
+        lines.extend(["", "Journal de la cellule depuis le début (exécution à confirmer pour les décisions)",
+                      *(f"- {line}" for line in journal_lines)])
     section("Informations transmises au personnage", (
         " · ".join(filter(None, (_excerpt(row.get("heure"), 55), _excerpt(row.get("source"), 55),
                                   _excerpt(row.get("propos"), 240))))

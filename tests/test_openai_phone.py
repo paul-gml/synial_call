@@ -146,7 +146,27 @@ def test_sms_uses_own_number_and_checks_single_use_dispatch_before_provider(voic
     assert len(posted) == 1 and posted[0]["from_"] == number
 
 
-def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_short_briefing():
+def test_unknown_caller_is_rejected_before_opening_live(voice_settings, monkeypatch):
+    from twilio.request_validator import RequestValidator
+
+    service = voice_settings
+    number = "+33939240123"
+    monkeypatch.setattr(service, "TWILIO_ACTOR_NUMBERS", {"prefet": number})
+    monkeypatch.setattr(service, "frontend_request", lambda action, payload: None)
+
+    async def unexpected(*args, **kwargs):
+        pytest.fail("A caller without a resolved participant must never open GPT Live.")
+
+    monkeypatch.setattr(service, "prepare_live_call", unexpected)
+    data = {"AccountSid": "test", "To": number, "From": "+33655550999", "CallSid": "CA" + "1" * 32}
+    signature = RequestValidator("test").compute_signature("https://voice.invalid/twilio/voice", data)
+    with TestClient(service.app) as client:
+        response = client.post("/twilio/voice", data=data, headers={"X-Twilio-Signature": signature})
+        assert response.status_code == 200
+        assert ElementTree.fromstring(response.text)[0].tag == "Reject"
+
+
+def test_managed_outbound_context_keeps_all_decisions_and_events_in_order():
     long_text = "Détail ancien de l'exercice. " * 100
     previous_sms = {"auteur": "Marc", "destinataire": "Sarah Lenoir", "propos": "Le portail nord était fermé."}
     data = {
@@ -154,11 +174,11 @@ def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_sh
         "informations_communicables_de_ce_personnage": long_text,
         "interlocuteur": {"nom": "Sophie", "fonction": "Direction"},
         "motif": "Confirmer l'accès au site",
-        "journal_de_la_cellule": {
-            "événements_et_conséquences_publiés": [{"extrait": long_text}] * 10
-            + [{"extrait": "Le portail a été ouvert à 14 h 15."}],
-            "décisions_soumises_par_la_cellule": [long_text] * 10 + ["La cellule décide d'envoyer les gendarmes."],
-        },
+        "journal_de_la_cellule": [
+            {"type": "décision annoncée", "texte": f"Décision {index:02d} : {long_text}fin {index:02d}."}
+            for index in range(10)
+        ] + [{"type": "événement publié", "texte": "Le portail a été ouvert à 14 h 15."},
+             {"type": "décision annoncée", "texte": "La cellule décide d'envoyer les gendarmes."}],
         "échanges_avec_les_autres_joueurs": [{"extraits": [previous_sms], "scenario_time": "14 h"}] * 20,
         "notes_animation": "Informations futures confidentielles.",
     }
@@ -172,7 +192,8 @@ def test_managed_outbound_context_keeps_recent_decisions_and_attribution_in_a_sh
     assert "Le portail a été ouvert à 14 h 15." in context
     assert "14 h · Marc → Sarah Lenoir : Le portail nord était fermé." in context
     assert not any(value in context for value in ("Dossier hors partie", "Informations futures confidentielles"))
-    assert len(context) < 3800
+    ordered = [f"fin {index:02d}." for index in range(10)] + ["Le portail a été ouvert", "d'envoyer les gendarmes"]
+    assert [context.index(part) for part in ordered] == sorted(context.index(part) for part in ordered)
     inbound = live.phone_session("journaliste", "inbound", "Direction", "", briefing=data)
     assert "ton intérêt s'entend dès la première question" not in inbound["instructions"]
     assert "Garde le même timbre" in inbound["instructions"]
