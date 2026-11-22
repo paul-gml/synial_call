@@ -393,12 +393,12 @@ def test_voice_override_supports_named_and_custom_voice(monkeypatch):
     assert live.phone_session('prefet', 'player', '', '')['audio']['output']['voice'] == {'id': 'voice_mock'}
 
 
-@pytest.mark.parametrize(('role', 'player_cue', 'admin_cue'), [
-    ('journaliste', 'Je prépare mon direct, faites vite', 'C\'est toi qui cherches le scoop'),
-    ('prefet', 'Je suis en réunion', 'Tu prends l\'initiative pour obtenir un bilan'),
-    ('colonel_pompiers', 'Colonel Vasseur, je vous écoute.', 'Tu appelles parce qu\'un renseignement'),
+@pytest.mark.parametrize(('role', 'player_cue', 'admin_cue', 'delivery_cue'), [
+    ('journaliste', 'curiosité perceptible', "le fait ou l'écart précis qui te fait appeler", "accélère la relance"),
+    ('prefet', 'autorité calme', "le risque ou l'arbitrage dès l'ouverture", "ralentis sur la priorité"),
+    ('colonel_pompiers', 'voix directe et attentive', "Tu appelles parce qu'un renseignement", "coupe net par un refus bref"),
 ])
-def test_call_origin_selects_one_role_opening_without_losing_scenario(role, player_cue, admin_cue):
+def test_call_origin_selects_one_role_opening_without_losing_scenario(role, player_cue, admin_cue, delivery_cue):
     dossier = 'Situation : accident sur la RD 973.\n\nJalon futur : conférence à 17h30.'
     history = ('SESSION 18 — HISTORIQUE FACTUEL\n\n[CONTEXTE INITIAL DE LA SIMULATION]\n\n'
                + dossier + '\n\n[FIN DU CONTEXTE INITIAL]\n\n[TOURS ET ÉVÉNEMENTS]')
@@ -407,6 +407,13 @@ def test_call_origin_selects_one_role_opening_without_losing_scenario(role, play
         assert dossier in config['input'][0]['content'][0]['text']
         assert 'Avant le premier événement' in config['instructions']
         assert expected in config['instructions'] and excluded not in config['instructions']
+        assert delivery_cue in config['instructions']
+
+    for origin, expected, excluded in [('inbound', player_cue, admin_cue), ('admin', admin_cue, player_cue)]:
+        config = live.phone_session(role, origin, '', history, briefing={"contexte_initial_connu": "Accident signalé."})
+        assert expected in config['instructions'] and excluded not in config['instructions']
+        assert delivery_cue in config['instructions']
+        assert 'Accident signalé.' in config['input'][0]['content'][0]['text']
 
 
 def test_provider_rejection_closes_socket_without_dialling(voice_settings, monkeypatch):
