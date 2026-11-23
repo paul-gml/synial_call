@@ -13,7 +13,7 @@ import websockets
 from phone_dialogue import CALLBACK_GREETING, GREETING, INBOUND_GREETING, ROLES, build_phone_dialogue
 
 
-MODEL = os.getenv("OPENAI_PHONE_MODEL", "").strip() or "gpt-live-1"
+MODEL = os.getenv("OPENAI_PHONE_MODEL", "").strip() or "gpt-live-1.1"
 RATE = 24000
 URL = "wss://api.openai.com/v1/live/sessions"
 DEFAULT_CODEC = "pcmu"

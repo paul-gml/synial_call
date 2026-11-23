@@ -1,6 +1,6 @@
 # Appels IA SYNIAL
 
-GPT-Live-1 incarne les trois personnages au téléphone. Twilio compose le numéro après réception de `session.started`, puis transporte l’audio avec Media Streams. L’interface, `/api/prepare_call` et le relais Quest suivent leurs parcours existants. L’appel préparé par SYNIAL fournit le jeton attendu par le flux Twilio. Le point d’entrée historique `/twilio/voice` répond 404.
+GPT-Live-1.1 incarne les trois personnages au téléphone. Twilio compose le numéro après réception de `session.started`, puis transporte l’audio avec Media Streams. L’interface, `/api/prepare_call` et le relais Quest suivent leurs parcours existants. L’appel préparé par SYNIAL fournit le jeton attendu par le flux Twilio. Le point d’entrée historique `/twilio/voice` répond 404.
 
 ## Configuration du service vocal
 
@@ -8,7 +8,7 @@ GPT-Live-1 incarne les trois personnages au téléphone. Twilio compose le numé
 | --- | --- |
 | `VOICE_CALL_PROVIDER` | `openai`. Remplacer une ancienne valeur `gemini` sur le service vocal. |
 | `OPENAI_API_KEY` | Clé de projet OpenAI avec accès à GPT-Live. |
-| `OPENAI_PHONE_MODEL` | `gpt-live-1`. |
+| `OPENAI_PHONE_MODEL` | `gpt-live-1.1`. Une valeur explicite dans l’environnement du service remplace ce choix. |
 | `OPENAI_PHONE_VOICE_JOURNALISTE` | `brise`. |
 | `OPENAI_PHONE_VOICE_PREFET` | `sillage`. |
 | `OPENAI_PHONE_VOICE_COLONEL_POMPIERS` | `sillage`. |
@@ -24,7 +24,7 @@ GPT-Live-1 incarne les trois personnages au téléphone. Twilio compose le numé
 
 Conserver les réglages Twilio, `VOICE_ADMIN_API_KEY`, `PUBLIC_BASE_URL`, `MAIN_APP_BASE_URL` et `INTERNAL_APP_TOKEN`. `/health` indique le modèle et le codec configurés. Le service vocal utilise un worker ASGI, car les appels préchauffés sont conservés dans sa mémoire.
 
-Les voix françaises `brise` et `sillage` figurent au catalogue GPT-Live. `marin` peut servir de voix témoin. Chaque variable de voix accepte aussi l’identifiant `voice_…` d’une voix autorisée dans le projet. Le rendu en français d’une voix personnalisée reste à tester. [Catalogue GPT-Live](https://developers.openai.com/api/docs/guides/live-conversations) · [Voix personnalisées](https://developers.openai.com/api/docs/guides/custom-voices)
+Le catalogue GPT-Live propose `brise` comme voix française féminine et `sillage` comme voix française masculine. SYNIAL utilise Brise pour la journaliste et Sillage pour le préfet et le colonel. Pour donner au colonel une autre voix française, `OPENAI_PHONE_VOICE_COLONEL_POMPIERS` accepte l’identifiant `voice_…` d’une voix personnalisée autorisée dans le projet. [Catalogue GPT-Live](https://developers.openai.com/api/docs/guides/live-conversations) · [Voix personnalisées](https://developers.openai.com/api/docs/guides/custom-voices)
 
 ## Pendant et après l’appel
 

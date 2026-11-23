@@ -108,6 +108,7 @@ def test_signed_inbound_registers_dialled_role_before_connecting_without_added_r
         assert requests[0][0] == "resolve" and requests[0][1]["actor"] == "prefet"
         assert requests[1][0] == "call_started" and requests[1][1]["direction"] == "in"
         config = upstream.sent[0]["session"]
+        assert config["model"] == "gpt-live-1.1"
         assert "Jean-Marc Delaunay" in config["instructions"]
         assert "Engagement SMS à 15 heures." in config["input"][0]["content"][0]["text"]
         assert "Allô" in config["input"][1]["content"][0]["text"]
@@ -309,7 +310,7 @@ def test_outbound_call_bridges_openai_audio_and_posts_transcript(voice_settings,
         })
         assert response.status_code == 200
         config = upstream.sent[0]['session']
-        assert config['model'] == 'gpt-live-1'
+        assert config['model'] == 'gpt-live-1.1'
         assert config['audio']['format'] == live.AUDIO_FORMATS[codec]
         text = config['input'][0]['content'][0]['text']
         assert 'Fait publié.' in text and 'Autre paragraphe.' in text
@@ -391,6 +392,14 @@ def test_voice_override_supports_named_and_custom_voice(monkeypatch):
     monkeypatch.setenv('OPENAI_PHONE_VOICE_PREFET', 'voice_mock')
     assert live.phone_session('journaliste', 'player', '', '')['audio']['output']['voice'] == 'marin'
     assert live.phone_session('prefet', 'player', '', '')['audio']['output']['voice'] == {'id': 'voice_mock'}
+
+
+def test_default_phone_voices_use_the_french_catalogue(monkeypatch):
+    for role, voice in (("journaliste", "brise"), ("prefet", "sillage"), ("colonel_pompiers", "sillage")):
+        monkeypatch.delenv(f"OPENAI_PHONE_VOICE_{role.upper()}", raising=False)
+        config = live.phone_session(role, "inbound", "", "", briefing={})
+        assert config["audio"]["output"]["voice"] == voice
+        assert config["audio"]["format"] == {"type": "audio/pcmu", "rate": 8000}
 
 
 @pytest.mark.parametrize(('role', 'player_cue', 'admin_cue', 'delivery_cue'), [
