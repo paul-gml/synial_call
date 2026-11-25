@@ -115,3 +115,32 @@ def test_short_silent_call_is_delivered_without_gemini(tmp_path):
     asyncio.run(spool.enqueue({"call_sid": "CA", "turns": []}, None, set(), 0))
     assert spool.process_one()
     assert payloads[0]["turns"] == [] and "Aucun échange" in payloads[0]["summary"]["key_points"]
+
+
+@pytest.mark.parametrize("managed", [False, True])
+def test_call_objectives_use_the_same_summary_request(managed):
+    calls = []
+    objectives = [
+        {"objective": "Obtenir une confirmation", "outcome": "achieved", "justification": "Confirmée.", "turn": 1},
+        {"objective": "Connaître les moyens", "outcome": "partial", "justification": "Un moyen identifié.", "turn": 1},
+        {"objective": "Faire venir un renfort", "outcome": "not_achieved", "justification": "Refus annoncé.", "turn": 1},
+        {"objective": "Connaître le délai", "outcome": "indeterminate", "justification": "Délai non évoqué.", "turn": None},
+    ]
+
+    def generate(**kwargs):
+        calls.append(kwargs)
+        fields = postcall.SUMMARY_FIELDS + postcall.MANAGED_FIELDS if managed else postcall.SUMMARY_FIELDS
+        reply = {key: "Résumé" for key in fields}
+        return SimpleNamespace(text=json.dumps({**reply, "objective_assessment": objectives, "memory": []}))
+
+    provider = SimpleNamespace(models=SimpleNamespace(generate_content=generate))
+    payload = {
+        "turns": [{"role": "user", "text": "Pouvez-vous confirmer la situation ?"},
+                  {"role": "assistant", "text": "Un véhicule est confirmé. Aucun autre ne peut être engagé."}],
+        "run_id": "run-test" if managed else "",
+    }
+    summary = postcall.summarize(provider, "mock-model", payload)
+    assert len(calls) == 1
+    assert "objective_assessment" in calls[0]["config"].response_json_schema["required"]
+    assert "ne prouve pas l'arrivée du renfort" in calls[0]["config"].system_instruction
+    assert summary["objective_assessment"] == objectives

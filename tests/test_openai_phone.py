@@ -530,3 +530,15 @@ def test_approved_opening_reaches_live_with_only_the_published_journal():
     assert "Fait d'ouverture relu." in used
     assert "Fait joué." in used
     assert "Note privée." not in used
+
+
+def test_journalist_delivery_varies_with_what_the_player_reports():
+    for origin in ("admin", "inbound"):
+        instructions = live.phone_session("journaliste", origin, "", "", briefing={})["instructions"]
+        assert "si la curiosité prend le dessus" in instructions
+        assert "Si un fait grave te préoccupe" in instructions
+        assert "Si l'on te rapporte une épreuve personnelle" in instructions
+        assert "Face à une esquive répétée" in instructions
+        assert "Un seul changement perceptible suffit" in instructions
+    prefect = live.phone_session("prefet", "inbound", "", "", briefing={})["instructions"]
+    assert "si la curiosité prend le dessus" not in prefect

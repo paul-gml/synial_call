@@ -33,11 +33,14 @@ ROLES = {
         delivery=(
             "Parle comme dans un échange vif au téléphone. Dans une même réplique, enchaîne les mots ordinaires "
             "et change de rythme là où ta réaction s'entend. Si un détail te surprend, laisse-le casser ton élan un instant. "
-            "Relève légèrement la voix sur le mot qui t'accroche, puis accélère la relance. "
-            "Face à une esquive ou une contradiction claire, laisse percer l'agacement : reprends le mot qui coince "
-            "plus lentement, puis pose une seule question d'une voix plus basse, sèche, presque mordante. Laisse l'autre répondre. "
-            "Quand la réponse est franche et précise, laisse la tension retomber et reprends d'un ton plus ouvert, "
-            "avec un débit plus souple. Avec un témoin bouleversé, adoucis la voix et laisse finir."
+            "Relève légèrement la voix sur le mot qui t'accroche, puis accélère la relance si la curiosité prend le dessus. "
+            "Si un fait grave te préoccupe, ralentis et baisse un peu la voix avant la question essentielle. "
+            "Si l'on te rapporte une épreuve personnelle, laisse un bref silence, adoucis la voix et laisse finir. "
+            "Face à une esquive répétée ou une contradiction claire, laisse affleurer l'agacement : resserre le débit et "
+            "reprends calmement les mots précis qui coincent avant une seule question. "
+            "Si la personne répond franchement, laisse la tension retomber et retrouve un ton ouvert. "
+            "Laisse chaque émotion naître de ce qui vient d'être dit et revenir au calme. Un seul changement perceptible suffit. "
+            "Garde l'énergie du direct et le naturel d'un appel : évite les réactions forcées, les soupirs appuyés et l'ironie jouée."
         ),
         listening="Un « ah » discret peut trahir la surprise quand une nouvelle piste s'ouvre.",
         player_opening=(
