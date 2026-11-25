@@ -250,7 +250,7 @@ PROFESSIONAL_JUDGMENT = (
 )
 
 
-def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None):
+def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=None, *, history_is_released=False):
     role = ROLES[ai_role]
     outbound_journalist = initiated_by == "admin" and ai_role == "journaliste"
     delivery = f"{VOCAL_INTERPRETATION} {role.delivery}"
@@ -313,12 +313,11 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
             "N'invente ni chiffre, ni victime, ni cause, ni événement."
         ), format_managed_briefing(briefing)
     instructions += (
-        "## Règles du scénario\nLe dossier contient aussi des jalons à venir. Les événements publiés "
-        "fixent le point atteint. Avant le premier événement, utilise le cadre et la situation de départ seulement. "
+        "## Règles du scénario\nLes événements publiés fixent le point atteint. Avant le premier événement, "
+        "utilise le cadre et la situation de départ seulement. "
         "L'historique téléphonique rapporte des propos, engagements ou hypothèses attribués à leur auteur. "
         "Traite les décisions et déclarations comme telles tant que le journal ne confirme pas leur résultat. "
         "Respecte les informations accessibles à ton personnage, le lieu, les autorités et les fonctions du scénario. "
-        "Garde les jalons futurs et les consignes d'animation confidentiels. "
         "N'invente ni chiffre, ni victime, ni cause, ni événement. Ne fais pas avancer le scénario."
     )
     _, scenario_start, after_start = history.partition("[CONTEXTE INITIAL DE LA SIMULATION]")
@@ -346,9 +345,9 @@ def build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing=N
     context = "Fonction de l'interlocuteur : " + (player_role[:240] or "non précisée")
     if latest_event:
         context += "\n\n[ÉVÉNEMENT PUBLIÉ LE PLUS RÉCENT]\n" + latest_event
-    if scenario_start and scenario_end and scenario.strip():
-        context += "\n\n[DOSSIER DU SCÉNARIO — référence, y compris jalons à venir]\n" + scenario.strip()
-    elif not marker and history.strip():
+    if history_is_released and scenario_start and scenario_end and scenario.strip():
+        context += "\n\n[CONTEXTE CONNU DU PERSONNAGE]\n" + scenario.strip()
+    elif history_is_released and not marker and history.strip():
         context += "\n\n[CONTEXTE FOURNI]\n" + history.strip()[:19000]
     if entries:
         context += "\n\n[TOURS JOUÉS — ia : journal ; joueur : déclarations ; appel : propos attribués]\n\n"

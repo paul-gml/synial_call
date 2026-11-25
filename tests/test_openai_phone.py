@@ -314,7 +314,7 @@ def test_outbound_call_bridges_openai_audio_and_posts_transcript(voice_settings,
         assert config['audio']['format'] == live.AUDIO_FORMATS[codec]
         text = config['input'][0]['content'][0]['text']
         assert 'Fait publié.' in text and 'Autre paragraphe.' in text
-        assert 'Secret futur' in text.split('[DOSSIER DU SCÉNARIO', 1)[1]
+        assert 'Secret futur' not in text
         assert 'Consigne historique' not in text
         params = {p.attrib['name']: p.attrib['value'] for p in ElementTree.fromstring(twilio[0]['twiml']).iter('Parameter')}
         assert 'stream_token' not in response.json()
@@ -408,11 +408,11 @@ def test_default_phone_voices_use_the_french_catalogue(monkeypatch):
     ('colonel_pompiers', 'voix directe et attentive', "Tu appelles parce qu'un renseignement", "coupe net par un refus bref"),
 ])
 def test_call_origin_selects_one_role_opening_without_losing_scenario(role, player_cue, admin_cue, delivery_cue):
-    dossier = 'Situation : accident sur la RD 973.\n\nJalon futur : conférence à 17h30.'
+    dossier = 'Situation : accident sur la RD 973.'
     history = ('SESSION 18 — HISTORIQUE FACTUEL\n\n[CONTEXTE INITIAL DE LA SIMULATION]\n\n'
                + dossier + '\n\n[FIN DU CONTEXTE INITIAL]\n\n[TOURS ET ÉVÉNEMENTS]')
     for origin, expected, excluded in [('player', player_cue, admin_cue), ('admin', admin_cue, player_cue)]:
-        config = live.phone_session(role, origin, '', history)
+        config = live.phone_session(role, origin, '', history, history_is_released=True)
         assert dossier in config['input'][0]['content'][0]['text']
         assert 'Avant le premier événement' in config['instructions']
         assert expected in config['instructions'] and excluded not in config['instructions']
@@ -518,3 +518,15 @@ def test_phone_audio_burst_stays_in_order_with_bounded_playback_lead(voice_setti
 
     asyncio.run(exercise())
     assert [timestamp - 100 for timestamp, _ in sent] == pytest.approx([0, 0, 0, 0, .02, .04, .06, .08])
+
+
+def test_approved_opening_reaches_live_with_only_the_published_journal():
+    history = (
+        "[CONTEXTE INITIAL DE LA SIMULATION]\nFait d'ouverture relu.\n[FIN DU CONTEXTE INITIAL]\n\n"
+        "[TOURS ET ÉVÉNEMENTS]\n\nia: Fait joué.\n\nadmin: Note privée."
+    )
+    config = live.phone_session("journaliste", "admin", "Direction", history, history_is_released=True)
+    used = config["input"][0]["content"][0]["text"]
+    assert "Fait d'ouverture relu." in used
+    assert "Fait joué." in used
+    assert "Note privée." not in used

@@ -30,8 +30,10 @@ def greeting_for(initiated_by):
     return {"admin": GREETING, "inbound": INBOUND_GREETING, "callback": CALLBACK_GREETING}.get(initiated_by)
 
 
-def phone_session(ai_role, initiated_by, player_role, history, codec=DEFAULT_CODEC, briefing=None):
-    instructions, context = build_phone_dialogue(ai_role, initiated_by, player_role, history, briefing)
+def phone_session(ai_role, initiated_by, player_role, history, codec=DEFAULT_CODEC, briefing=None, *,
+                  history_is_released=False):
+    instructions, context = build_phone_dialogue(
+        ai_role, initiated_by, player_role, history, briefing, history_is_released=history_is_released)
     voice = os.getenv(f"OPENAI_PHONE_VOICE_{ai_role.upper()}", "").strip() or ROLES[ai_role].voice
     if voice.startswith("voice_"):
         voice = {"id": voice}

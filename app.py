@@ -264,6 +264,7 @@ class PreparedCall:
     run_id: str = ""
     player_id: str = ""
     scenario_time: str = ""
+    narrative_epoch: Optional[str] = None
     managed_greeting: bool = False
     inbound_registered: bool = False
     opening_event_id: Optional[str] = None
@@ -1058,7 +1059,7 @@ async def prepare_live_call(body, ai_role, initiated_by):
     config = openai_live_phone.phone_session(
         ai_role, "callback" if briefing and initiated_by == "player" else initiated_by,
         str(body.get("player_role") or ""), str(body.get("history_text") or ""), OPENAI_PHONE_CODEC,
-        briefing=briefing,
+        briefing=briefing, history_is_released=body.get("history_is_released") is True,
     )
     cm = openai_live_phone.connect(OPENAI_API_KEY, config)
     upstream = await cm.__aenter__()
@@ -1068,6 +1069,7 @@ async def prepare_live_call(body, ai_role, initiated_by):
         codec=OPENAI_PHONE_CODEC, stream_token=uuid.uuid4().hex, upstream_cm=cm, upstream=upstream,
         number_session=int(body.get("number_session") or 0), run_id=str(body.get("run_id") or ""),
         player_id=str(body.get("player_id") or ""), scenario_time=str(body.get("scenario_time") or ""),
+        narrative_epoch=body.get("narrative_epoch"),
         managed_greeting=bool(briefing), twilio_call_sid=body.get("call_sid"),
         participant_phone=str(body.get("to") or ""),
     )
@@ -1516,6 +1518,7 @@ async def enqueue_phone_record(postcall, prepared, ctx, recording, deltas, final
         "number_session": prepared.number_session, "call_sid": ctx.call_sid, "turns": turns,
         "player_name": prepared.player_name, "initiated_by": prepared.initiated_by, "ai_role": prepared.ai_role,
         "transcript_source": "live" if turns else "no_exchange",
+        "narrative_epoch": getattr(prepared, "narrative_epoch", None),
     }
     if getattr(prepared, "run_id", ""):
         payload.update(run_id=prepared.run_id, player_id=prepared.player_id,
